@@ -1,0 +1,69 @@
+@base_url = http://127.0.0.1:8000
+# 将 token 替换为本地 config.yaml 中的 app.api_token；不要提交真实令牌。
+@token = replace-with-local-api-token
+# 逐步执行请求，将下列占位符替换为实际响应中的值。
+@operation_id = replace-with-operation-id
+@mailbox_id = replace-with-mailbox-id
+@mailbox_email = replace-with-mailbox-email
+@message_id = replace-with-message-id
+
+### 存活检查，不需要鉴权
+GET {{base_url}}/health/live
+
+### 就绪检查，不需要鉴权
+GET {{base_url}}/health/ready
+
+### 查询供应商能力；当前两家均仅支持收件
+GET {{base_url}}/v1/capabilities
+Authorization: Bearer {{token}}
+
+### 创建 temp-mail.org 邮箱。auto 按 YAML 顺序选择，模板默认也是此供应商。
+# 新建另一个邮箱请更换幂等键；重试此请求保留原键。
+POST {{base_url}}/v1/mailboxes
+Authorization: Bearer {{token}}
+Idempotency-Key: temp-mail-org-create-001
+Content-Type: application/json
+
+{
+  "provider": "temp-mail-org",
+  "required_capabilities": ["receive"],
+  "ttl_seconds": 3600
+}
+
+### 或者创建 TempMail.lol 邮箱，免费有效期最多 3600 秒
+# 上游为消费式收件；只让本项目 Worker 读取该令牌，不另开浏览器消费者。
+POST {{base_url}}/v1/mailboxes
+Authorization: Bearer {{token}}
+Idempotency-Key: tempmail-lol-create-001
+Content-Type: application/json
+
+{
+  "provider": "tempmail-lol",
+  "required_capabilities": ["receive"],
+  "ttl_seconds": 3600
+}
+
+### 将创建响应 id 填入 operation_id；Worker 完成后 result 包含 mailbox_id 与 email
+GET {{base_url}}/v1/operations/{{operation_id}}
+Authorization: Bearer {{token}}
+
+### 列出邮箱
+GET {{base_url}}/v1/mailboxes?limit=20&offset=0
+Authorization: Bearer {{token}}
+
+### 将 result.email 填入 mailbox_email，按完整地址精确查询绑定
+GET {{base_url}}/v1/mailboxes?email={{mailbox_email}}
+Authorization: Bearer {{token}}
+
+### 将 result.mailbox_id 填入 mailbox_id，查询元数据及最近同步错误
+GET {{base_url}}/v1/mailboxes/{{mailbox_id}}
+Authorization: Bearer {{token}}
+
+### 查询本地收件缓存。需等待 Worker 同步，空列表不代表邮箱创建失败。
+# 验证真实来信时，请从自己的外部邮箱向新地址发送测试邮件。
+GET {{base_url}}/v1/mailboxes/{{mailbox_id}}/messages?limit=20&offset=0
+Authorization: Bearer {{token}}
+
+### 从上一个列表取邮件 id 填入 message_id，正文为纯文本
+GET {{base_url}}/v1/mailboxes/{{mailbox_id}}/messages/{{message_id}}
+Authorization: Bearer {{token}}
