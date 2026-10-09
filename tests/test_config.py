@@ -10,7 +10,9 @@ from app.api import create_app
 from app.config import ProviderSettings, Settings
 from app.providers.base import ProviderError
 from app.providers.factory import build_registry
-from tests.test_temp_mail_org import Response, ScriptedTransport, detail, listing
+from tests.fakes import Response, ScriptedTransport
+from tests.fakes import org_detail as detail
+from tests.fakes import org_listing as listing
 
 
 @pytest.fixture
@@ -78,6 +80,8 @@ def test_yaml_provider_order_and_explicit_enablement_control_auto_selection(docu
     assert settings.sync_interval_seconds == 15
     assert settings.operation_timeout_seconds == 300
     assert settings.worker_poll_seconds == 1
+    assert settings.create_concurrency == 2
+    assert settings.receive_concurrency == 4
     with pytest.raises(ProviderError) as caught:
         registry.select(["send"], 3600)
     assert caught.value.code == "CAPABILITY_UNSUPPORTED"
@@ -106,13 +110,6 @@ def test_direct_settings_keep_default_providers_without_shared_mutable_options(d
     assert "proxy" not in second.providers["temp-mail-org"].options
     assert "private-proxy-password" not in repr(first)
     assert ProviderSettings().enabled is True
-
-
-@pytest.mark.parametrize("provider_id", ["demo_full", "demo_receive"])
-def test_removed_demo_provider_ids_are_rejected_in_yaml(document, tmp_path, provider_id):
-    document["providers"] = {provider_id: {"enabled": True}}
-    with pytest.raises(ValueError):
-        Settings.from_yaml(write_config(tmp_path / "config.yaml", document))
 
 
 def test_registry_construction_neither_creates_database_nor_adds_simulated_tables(document, tmp_path):
@@ -232,6 +229,23 @@ def test_invalid_numeric_configuration_is_rejected(document, tmp_path, section, 
     with pytest.raises(ValueError):
         settings = Settings.from_yaml(write_config(tmp_path / "config.yaml", document))
         build_registry(settings)
+
+
+@pytest.mark.parametrize("field", ["create_concurrency", "receive_concurrency"])
+@pytest.mark.parametrize("value", [0, -1, 33, True, 2.0, "2", None])
+def test_worker_concurrency_requires_bounded_integer(document, tmp_path, field, value):
+    document["worker"] = {field: value}
+    with pytest.raises(ValueError, match=field):
+        Settings.from_yaml(write_config(tmp_path / "config.yaml", document))
+    with pytest.raises(ValueError, match=field):
+        Settings(**document["app"], **{field: value})
+
+
+@pytest.mark.parametrize("value", [1, 32])
+def test_worker_concurrency_accepts_bounds(document, tmp_path, value):
+    document["worker"] = {"create_concurrency": value, "receive_concurrency": value}
+    settings = Settings.from_yaml(write_config(tmp_path / "config.yaml", document))
+    assert settings.create_concurrency == settings.receive_concurrency == value
 
 
 def test_invalid_yaml_syntax_does_not_expose_secret_source_lines(tmp_path):

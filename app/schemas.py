@@ -2,6 +2,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
+from app.limits import MAX_MAILBOX_TTL_SECONDS, MIN_MAILBOX_TTL_SECONDS
+
 Capability = Literal["receive", "send", "delete", "attachments", "webhook", "custom_local_part"]
 EmailAddress = Annotated[str, Field(min_length=3, max_length=320, pattern=r"^[^@\s]+@[^@\s]+$")]
 
@@ -10,7 +12,7 @@ class CreateMailbox(BaseModel):
     model_config = {"extra": "forbid"}
     provider: str = Field(default="auto", min_length=1, max_length=100)
     required_capabilities: list[Capability] = Field(default_factory=lambda: ["receive"], min_length=1)
-    ttl_seconds: int = Field(default=3600, ge=60, le=86400)
+    ttl_seconds: int = Field(default=3600, ge=MIN_MAILBOX_TTL_SECONDS, le=MAX_MAILBOX_TTL_SECONDS)
 
 
 class SendMessage(BaseModel):
@@ -30,6 +32,13 @@ class OperationView(BaseModel):
     error_code: str | None
     created_at: str
     updated_at: str
+
+
+class OperationPage(BaseModel):
+    items: list[OperationView]
+    limit: int
+    offset: int
+    total: int
 
 
 class MailboxView(BaseModel):
@@ -61,6 +70,24 @@ class MailboxPage(BaseModel):
     items: list[MailboxView]
     limit: int
     offset: int
+    total: int
+
+
+class MailboxCleanupPreview(BaseModel):
+    count: int
+    cutoff: str
+    revision: str
+
+
+class CleanupMailboxes(BaseModel):
+    model_config = {"extra": "forbid"}
+    cutoff: str = Field(min_length=1, max_length=64)
+    expected_count: int = Field(ge=0, strict=True)
+    revision: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class MailboxCleanupResult(BaseModel):
+    deleted_count: int
 
 
 class MessagePage(BaseModel):

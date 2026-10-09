@@ -14,10 +14,11 @@ providers:
     base_url: https://web2.temp-mail.org
     timeout_seconds: 15
     impersonate: chrome110
+    max_ttl_seconds: 86400
     proxy: null
 ```
 
-`index_url` 仅说明网站入口，`base_url` 是实际 API 地址。客户端使用 curl_cffi，默认 `impersonate: chrome110`。修改配置后重启 API 和 Worker。
+`index_url` 仅说明网站入口，`base_url` 是实际 API 地址。客户端使用 curl_cffi，默认 `impersonate: chrome110`。供应商配置保存后 API 立即热更新，Worker 在安全的任务边界应用，无需重启；在途请求使用旧配置完成。
 
 `proxy` 是正式请求代理配置，支持 HTTP、HTTPS、SOCKS4、SOCKS4a、SOCKS5、SOCKS5h 和 URL 内认证。省略、`null` 或空白值保留 curl_cffi 的环境代理行为，不保证直连。显式代理失败返回 `PROVIDER_UNAVAILABLE`，不会自动切换直连。
 
@@ -37,7 +38,9 @@ providers:
 
 每个邮箱独立返回令牌，无需共享上游 API Key 或 Cookie。业务层使用 Fernet 加密保存令牌，`upstream_id` 使用令牌的 SHA-256 摘要标识生命周期。令牌失效时保留原绑定，不创建新邮箱或切换供应商；摘要不能作为访问凭证。
 
-本服务允许请求 60–86400 秒的有效期，该期限仅限制本地访问。上游未提供已验证的有效期，不能据此保证邮箱或邮件存活时长。本地到期会清理凭据和缓存，不代表远端数据已删除。
+`max_ttl_seconds` 配置最长本地有效期，接受 60–31536000 的整数秒，默认 86400。创建请求的 `ttl_seconds` 必须至少为 60 秒，且不超过该上限。可以在供应商卡片的“编辑配置”弹窗中修改并保存，API 随即按新上限校验创建请求，Worker 在任务边界加载新配置。已有邮箱的到期时间不追溯修改。
+
+该期限仅限制本地收发。上游未提供已验证的有效期，不能据此保证邮箱或邮件存活时长；若返回上游到期时间，则与请求期限取较早值。本地到期会停止收发并清理上游访问凭据，已缓存邮件继续只读保留；用户确认清除失效邮箱时才删除本地邮箱及邮件数据。这不代表远端数据已删除。
 
 创建请求指定 `provider: "temp-mail-org"`、`required_capabilities: ["receive"]` 和 `ttl_seconds`。查询创建操作成功后，通过统一邮件 API 读取 Worker 同步的缓存。完整请求示例见 [test_main.http](../../test_main.http)。
 

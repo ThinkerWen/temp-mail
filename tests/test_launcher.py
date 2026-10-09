@@ -15,7 +15,9 @@ import yaml
 from cryptography.fernet import Fernet
 
 import run as launcher
+from app import server
 from app.db import Database, utcnow
+from app.logging import UVICORN_LOG_CONFIG
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -105,6 +107,17 @@ def test_real_api_and_worker_process_queue_and_stop_together(isolated_project, r
                 process.send_signal(shutdown_signal)
                 assert process.wait(timeout=20) == 0, log_path.read_text()
                 wait_until(lambda: all(not process_exists(pid) for pid in pids), timeout=5)
+                log = log_path.read_text()
+                for marker in ["Starting API", "Started Worker", "Started server process", "Worker tick:", "GET /health/ready HTTP/1.1"]:
+                    entries = [line for line in log.splitlines() if marker in line]
+                    assert entries, log
+                    assert all(re.match(r"^\d{4}-\d{2}-\d{2} .* \| INFO\s* \| PID \d+ \| ", line) for line in entries), log
+                assert log.count("Started Worker") == 1, log
+                assert log.count("Started server process") == (2 if reload_api else 1), log
+                if reload_api:
+                    entries = [line for line in log.splitlines() if "Started reloader process" in line]
+                    assert len(entries) == 1, log
+                    assert "| INFO" in entries[0] and "| PID " in entries[0], log
                 with pytest.raises(httpx.ConnectError):
                     client.get("/health/ready")
         finally:
@@ -167,3 +180,65 @@ def test_api_startup_failure_does_not_start_worker(monkeypatch):
     assert launcher.main([]) == 1
     assert start_process.call_count == 1
     stop_processes.assert_called_once_with([("API", api)])
+
+
+@pytest.fixture
+def uvicorn_run(monkeypatch):
+    run = Mock()
+    monkeypatch.setattr(server.uvicorn, "run", run)
+    return run
+
+
+def test_server_defaults_use_python_log_config(uvicorn_run):
+    server.main([])
+    uvicorn_run.assert_called_once()
+    args, kwargs = uvicorn_run.call_args
+    assert args == ("main:app",)
+    assert kwargs["log_config"] is UVICORN_LOG_CONFIG
+    assert isinstance(kwargs["log_config"], dict)
+    assert kwargs["host"] == "127.0.0.1"
+    assert kwargs["port"] == 8000
+    assert kwargs["reload"] is False
+    assert kwargs.get("reload_dirs") is None
+    assert kwargs.get("timeout_graceful_shutdown") is None
+
+
+def test_server_forwards_custom_options_and_all_reload_directories(uvicorn_run):
+    server.main(
+        [
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "8123",
+            "--reload",
+            "--reload-dir",
+            "app",
+            "--reload-dir",
+            "tests",
+            "--timeout-graceful-shutdown",
+            "7",
+        ]
+    )
+    uvicorn_run.assert_called_once()
+    args, kwargs = uvicorn_run.call_args
+    assert args == ("main:app",)
+    assert kwargs["log_config"] is UVICORN_LOG_CONFIG
+    assert kwargs["host"] == "0.0.0.0"
+    assert kwargs["port"] == 8123
+    assert kwargs["reload"] is True
+    assert kwargs["reload_dirs"] == ["app", "tests"]
+    assert kwargs["timeout_graceful_shutdown"] == 7
+
+
+@pytest.mark.parametrize("port", ["0", "65536", "-1", "invalid"])
+def test_server_rejects_invalid_ports_before_starting_uvicorn(uvicorn_run, port):
+    with pytest.raises(SystemExit) as exc:
+        server.main(["--port", port])
+    assert exc.value.code == 2
+    uvicorn_run.assert_not_called()
+
+
+@pytest.mark.parametrize("port", ["1", "65535"])
+def test_server_accepts_port_boundaries(uvicorn_run, port):
+    server.main(["--port", port])
+    assert uvicorn_run.call_args.kwargs["port"] == int(port)

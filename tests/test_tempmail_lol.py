@@ -1,5 +1,3 @@
-from collections import deque
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -14,51 +12,11 @@ from app.providers.base import ProviderError, ProviderMailbox
 from app.providers.factory import build_registry
 from app.providers.registry import Registry
 from app.providers.tempmail_lol import TempMailLolProvider
+from tests.fakes import Response, ScriptedTransport
 
 EMAIL = "private@inbox.example.test"
 TOKEN = "private/token+with&reserved?characters=#"
 BASE_URL = "https://upstream.example.test/v2"
-
-
-@dataclass
-class Response:
-    status_code: int
-    data: object = None
-
-    def json(self):
-        if isinstance(self.data, Exception):
-            raise self.data
-        return self.data
-
-
-class ScriptedTransport:
-    def __init__(self, *responses):
-        self.responses = deque(responses)
-        self.calls = []
-        self.session_options = []
-
-    def __call__(self, **kwargs):
-        self.session_options.append(kwargs)
-        return Session(self)
-
-
-class Session:
-    def __init__(self, transport):
-        self.transport = transport
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        return False
-
-    def request(self, method, url, **kwargs):
-        self.transport.calls.append({"method": method, "url": url, **kwargs})
-        assert self.transport.responses, "Unexpected extra upstream request"
-        response = self.transport.responses.popleft()
-        if isinstance(response, Exception):
-            raise response
-        return response
 
 
 @pytest.fixture

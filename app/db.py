@@ -1,3 +1,6 @@
+import errno
+import hashlib
+import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -45,6 +48,7 @@ CREATE TABLE IF NOT EXISTS operations (
     UNIQUE(owner_id, kind, idempotency_key)
 );
 CREATE INDEX IF NOT EXISTS operations_queue ON operations(status, created_at);
+CREATE INDEX IF NOT EXISTS operations_owner_created ON operations(owner_id, created_at DESC, id DESC);
 CREATE TABLE IF NOT EXISTS messages (
     id TEXT PRIMARY KEY,
     mailbox_id TEXT NOT NULL REFERENCES mailboxes(id),
@@ -76,6 +80,52 @@ class Database:
         with self.connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(SCHEMA)
+
+    @contextmanager
+    def mailbox_lock(self, mailbox_id: str):
+        # Separate lock files survive database transactions and serialize consuming reads across processes.
+        directory = Path(self.path + ".mailbox-locks")
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path = directory / hashlib.sha256(mailbox_id.encode()).hexdigest()
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        acquired = False
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                if os.fstat(descriptor).st_size == 0:
+                    os.write(descriptor, b"\0")
+                os.lseek(descriptor, 0, os.SEEK_SET)
+
+                def acquire():
+                    msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+
+                def release():
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                def acquire():
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+                def release():
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+
+            try:
+                acquire()
+                acquired = True
+            except OSError as exc:
+                if exc.errno not in (errno.EACCES, errno.EAGAIN):
+                    raise
+            yield acquired
+        finally:
+            try:
+                if acquired:
+                    release()
+            finally:
+                # Do not unlink: another process may already have opened this inode.
+                os.close(descriptor)
 
     @contextmanager
     def connect(self, *, write: bool = False):

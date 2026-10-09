@@ -1,5 +1,4 @@
-from collections import deque
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -14,51 +13,13 @@ from app.providers import factory
 from app.providers.base import ProviderError, ProviderMailbox
 from app.providers.registry import Registry
 from app.providers.temp_mail_org import TempMailOrgProvider
+from tests.fakes import Response, ScriptedTransport
+from tests.fakes import org_detail as detail
+from tests.fakes import org_listing as listing
 
 EMAIL = "private@example.test"
 TOKEN = "private-upstream-token"
 BASE_URL = "https://upstream.example.test"
-
-
-@dataclass
-class Response:
-    status_code: int
-    data: object = None
-
-    def json(self):
-        if isinstance(self.data, Exception):
-            raise self.data
-        return self.data
-
-
-class ScriptedTransport:
-    def __init__(self, *responses):
-        self.responses = deque(responses)
-        self.calls = []
-        self.sessions = 0
-
-    def __call__(self):
-        self.sessions += 1
-        return Session(self)
-
-
-class Session:
-    def __init__(self, transport):
-        self.transport = transport
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        return False
-
-    def request(self, method, url, **kwargs):
-        self.transport.calls.append({"method": method, "url": url, **kwargs})
-        assert self.transport.responses, "Unexpected extra upstream request"
-        response = self.transport.responses.popleft()
-        if isinstance(response, Exception):
-            raise response
-        return response
 
 
 @pytest.fixture
@@ -77,26 +38,6 @@ def mailbox():
 
 def provider(transport):
     return TempMailOrgProvider(base_url=BASE_URL, timeout_seconds=3, session_factory=transport)
-
-
-def listing(*message_ids, email=EMAIL):
-    return Response(
-        200, {"mailbox": email, "messages": [{"_id": message_id, "bodyPreview": "Only a preview"} for message_id in message_ids]}
-    )
-
-
-def detail(message_id, **fields):
-    return Response(
-        200,
-        {
-            "_id": message_id,
-            "from": "sender@example.test",
-            "subject": "Test mail",
-            "receivedAt": 1_700_000_000,
-            "bodyHtml": "<p>Hello</p>",
-            **fields,
-        },
-    )
 
 
 def api_client(settings, registry=None):

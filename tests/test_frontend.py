@@ -43,6 +43,24 @@ def test_frontend_is_public_and_api_authentication_is_preserved(frontend_client)
     assert frontend_client.get("/docs").status_code == 200
 
 
+@pytest.mark.parametrize("path", ["/inbox", "/providers", "/operations", "/settings"])
+def test_frontend_pages_support_direct_visits_and_refresh(frontend_client, path):
+    response = frontend_client.get(path)
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert response.headers["cache-control"] == "no-cache"
+    assert '<div id="root"></div>' in response.text
+    assert path not in frontend_client.get("/openapi.json").json()["paths"]
+
+
+@pytest.mark.parametrize("path", ["/inbox", "/providers", "/operations", "/settings"])
+def test_frontend_pages_redirect_trailing_slash_and_preserve_query(frontend_client, path):
+    response = frontend_client.get(f"{path}/?view=test", follow_redirects=False)
+    assert response.status_code == 307
+    assert response.headers["location"] == f"http://testserver{path}?view=test"
+    assert frontend_client.get(response.headers["location"]).status_code == 200
+
+
 def test_frontend_assets_are_served_independently_of_working_directory(frontend_client, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     script = frontend_client.get("/assets/index-example.js")
@@ -51,7 +69,20 @@ def test_frontend_assets_are_served_independently_of_working_directory(frontend_
     assert "javascript" in script.headers["content-type"]
 
 
-@pytest.mark.parametrize("path", ["/v1/unknown", "/health/unknown", "/unknown", "/assets/missing.js", "/config.yaml"])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/v1/unknown",
+        "/health/unknown",
+        "/unknown",
+        "/inbox/unknown",
+        "/providers/unknown",
+        "/operations/unknown",
+        "/settings/unknown",
+        "/assets/missing.js",
+        "/config.yaml",
+    ],
+)
 def test_unknown_routes_do_not_return_frontend(frontend_client, path):
     response = frontend_client.get(path)
     assert response.status_code == 404
@@ -73,7 +104,8 @@ def test_api_starts_without_built_frontend(frontend_client, tmp_path, monkeypatc
     monkeypatch.setattr(api, "FRONTEND_DIST", tmp_path / "not-built")
     service = frontend_client.app.state.service
     with TestClient(api.create_app(service.settings, service.registry)) as client:
-        assert client.get("/").status_code == 404
+        for path in ("/", "/inbox", "/providers", "/operations", "/settings", "/inbox/", "/providers/", "/operations/", "/settings/"):
+            assert client.get(path).status_code == 404
         assert client.get("/assets/index-example.js").status_code == 404
         assert client.get("/health/ready").status_code == 200
         assert client.get("/v1/capabilities").status_code == 401

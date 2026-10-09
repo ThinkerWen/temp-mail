@@ -5,6 +5,7 @@ import math
 import re
 from collections.abc import Callable
 from contextlib import AbstractContextManager
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote, urlsplit
@@ -12,6 +13,7 @@ from urllib.parse import quote, urlsplit
 from curl_cffi import requests
 from curl_cffi.requests.exceptions import RequestException
 
+from app.limits import validate_max_ttl_seconds
 from app.providers.base import Capabilities, ProviderError, ProviderMailbox, ProviderMessage
 from app.providers.message_text import html_to_text
 
@@ -28,8 +30,11 @@ class TempMailOrgProvider:
         timeout_seconds: float = 15,
         impersonate: str = "chrome110",
         proxy: str | None = None,
+        max_ttl_seconds: int = 86400,
         session_factory: Callable[[], AbstractContextManager[Any]] | None = None,
     ):
+        validate_max_ttl_seconds(max_ttl_seconds)
+        self.capabilities = replace(type(self).capabilities, max_ttl_seconds=max_ttl_seconds)
         parsed = urlsplit(base_url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username is not None or parsed.password is not None:
             raise ValueError("Temp Mail API URL must be an HTTP(S) URL without credentials")

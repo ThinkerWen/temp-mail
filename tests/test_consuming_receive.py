@@ -1,39 +1,14 @@
 import json
 import sqlite3
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from dataclasses import replace
-from threading import Event
 
 import pytest
 from cryptography.fernet import Fernet
 
 from app.config import Settings
-from app.providers.base import ProviderError, ProviderMessage
 from app.providers.registry import Registry
 from app.service import Service
-from tests.fakes import FakeProvider
-
-
-class ConsumingProvider(FakeProvider):
-    def __init__(self, path):
-        super().__init__("consuming", path)
-        self.capabilities = replace(self.capabilities, destructive_receive=True)
-        self.fetches = 0
-        self.fail_parsing = False
-        self.batch_ids = []
-
-    def fetch_messages(self, mailbox):
-        self.fetches += 1
-        return {"body": "private consumed message"}
-
-    def parse_messages(self, mailbox, payload, batch_id):
-        self.batch_ids.append(batch_id)
-        if self.fail_parsing:
-            raise ProviderError("PROVIDER_INVALID_RESPONSE", "Cannot normalize response")
-        return [
-            ProviderMessage(batch_id + ":0", "sender@example.com", [mailbox.email], "subject", payload["body"], "2026-01-01T00:00:00+00:00")
-        ]
+from tests.fakes import ConsumingProvider
 
 
 @pytest.fixture
@@ -65,6 +40,7 @@ def test_consumed_batch_survives_parser_failure_and_process_restart(setup):
     assert provider.batch_ids == [batch["id"]] * 3
     with restarted.db.connect() as conn:
         assert conn.execute("SELECT count(*) FROM message_batches").fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM messages").fetchone()[0] == 1
         assert conn.execute("SELECT text FROM messages").fetchone()[0] == "private consumed message"
 
 
@@ -96,7 +72,7 @@ def test_consumed_batch_replays_after_cache_commit_failure(setup, monkeypatch):
 
 
 @pytest.mark.parametrize("action", ["expire", "delete"])
-def test_pending_batch_is_removed_with_mailbox_data(setup, action):
+def test_pending_batch_is_retained_on_expiry_and_removed_on_explicit_deletion(setup, action):
     service, provider, mailbox_id = setup
     provider.fail_parsing = True
     assert service.sync_mailbox(mailbox_id) is False
@@ -109,29 +85,5 @@ def test_pending_batch_is_removed_with_mailbox_data(setup, action):
         service._execute_operation(service._claim_operation())
         assert service.get_operation(operation["id"])["status"] == "succeeded"
     with service.db.connect() as conn:
-        assert conn.execute("SELECT count(*) FROM message_batches").fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM message_batches").fetchone()[0] == int(action == "expire")
         assert conn.execute("SELECT credential_encrypted FROM mailboxes").fetchone()[0] is None
-
-
-def test_concurrent_workers_reuse_pending_consumed_response(setup, monkeypatch):
-    service, provider, mailbox_id = setup
-    entered, release = Event(), Event()
-    original_fetch = provider.fetch_messages
-    provider.fail_parsing = True
-
-    def blocking_fetch(mailbox):
-        entered.set()
-        assert release.wait(5)
-        return original_fetch(mailbox)
-
-    monkeypatch.setattr(provider, "fetch_messages", blocking_fetch)
-    other = Service(service.settings, Registry([provider]))
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        first = pool.submit(service.sync_mailbox, mailbox_id)
-        assert entered.wait(5)
-        second = pool.submit(other.sync_mailbox, mailbox_id)
-        release.set()
-        assert first.result(timeout=5) is False
-        assert second.result(timeout=5) is False
-    assert provider.fetches == 1
-    assert len(set(provider.batch_ids)) == 1

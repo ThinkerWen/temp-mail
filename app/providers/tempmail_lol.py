@@ -5,6 +5,7 @@ import math
 import re
 from collections.abc import Callable
 from contextlib import AbstractContextManager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlsplit
@@ -13,6 +14,7 @@ from uuid import uuid4
 from curl_cffi import requests
 from curl_cffi.requests.exceptions import RequestException
 
+from app.limits import validate_max_ttl_seconds
 from app.providers.base import Capabilities, ProviderError, ProviderMailbox, ProviderMessage
 from app.providers.message_text import html_to_text
 
@@ -28,8 +30,11 @@ class TempMailLolProvider:
         timeout_seconds: float = 15,
         impersonate: str = "chrome110",
         proxy: str | None = None,
+        max_ttl_seconds: int = 3600,
         session_factory: Callable[[], AbstractContextManager[Any]] | None = None,
     ):
+        validate_max_ttl_seconds(max_ttl_seconds)
+        self.capabilities = replace(type(self).capabilities, max_ttl_seconds=max_ttl_seconds)
         try:
             parsed = urlsplit(base_url)
             valid_url = (
@@ -125,7 +130,8 @@ class TempMailLolProvider:
     def create_mailbox(self, ttl_seconds: int, request_id: str) -> ProviderMailbox:
         if type(ttl_seconds) is not int or not 0 < ttl_seconds <= self.capabilities.max_ttl_seconds:
             raise ProviderError("TTL_UNSUPPORTED", "Requested inbox lifetime is unsupported")
-        expires_at = (datetime.now(UTC) + timedelta(seconds=3600)).isoformat()
+        # Local retention estimate; the upstream may report expiration earlier.
+        expires_at = (datetime.now(UTC) + timedelta(seconds=self.capabilities.max_ttl_seconds)).isoformat()
         payload = self._request("POST", "/inbox/create", json={"domain": None, "captcha": None})
         self._check_envelope(payload)
         email, token = payload.get("address"), payload.get("token")

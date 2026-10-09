@@ -1,7 +1,6 @@
 """Run the local API and one worker under a shared process supervisor."""
 
 import argparse
-import logging
 import os
 import signal
 import socket
@@ -13,10 +12,12 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from loguru import logger
+
 from app.config import Settings
+from app.logging import configure_logging
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-logger = logging.getLogger("launcher")
 
 
 def start_process(arguments: list[str]) -> subprocess.Popen:
@@ -49,7 +50,7 @@ def stop_processes(processes: list[tuple[str, subprocess.Popen]], timeout: float
         try:
             process.wait(timeout=max(0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
-            logger.warning("%s did not stop in time; terminating its process group", name)
+            logger.warning("{} did not stop in time; terminating its process group", name)
     for _, process in processes:
         signal_process(process, force=True)
         process.wait()
@@ -73,7 +74,7 @@ def wait_for_api(process: subprocess.Popen, host: str, port: int, stop: threadin
     deadline = time.monotonic() + timeout
     while not stop.wait(0.1):
         if process.poll() is not None:
-            logger.error("API exited before becoming ready (exit code %s)", process.returncode)
+            logger.error("API exited before becoming ready (exit code {})", process.returncode)
             return False
         try:
             with opener.open(f"http://{authority}:{port}/health/ready", timeout=0.5) as response:
@@ -82,7 +83,7 @@ def wait_for_api(process: subprocess.Popen, host: str, port: int, stop: threadin
         except (OSError, urllib.error.URLError):
             pass
         if time.monotonic() >= deadline:
-            logger.error("API did not become ready within %s seconds", timeout)
+            logger.error("API did not become ready within {} seconds", timeout)
             return False
     return False
 
@@ -95,16 +96,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if not 1 <= args.port <= 65535:
         parser.error("--port must be between 1 and 65535")
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [launcher] %(message)s")
+    configure_logging()
     try:
-        Settings.from_yaml(PROJECT_ROOT / "config.yaml")
+        Settings.from_yaml(PROJECT_ROOT / os.environ.get("TEMP_MAIL_CONFIG", "config.yaml"))
     except (OSError, ValueError):
         logger.error("Cannot read project config.yaml; initialize it with: uv run python scripts/init_config.py")
         return 1
     try:
         check_port(args.host, args.port)
     except OSError:
-        logger.error("Cannot bind %s:%s; stop the existing API or choose another --port", args.host, args.port)
+        logger.error("Cannot bind {}:{}; stop the existing API or choose another --port", args.host, args.port)
         return 1
 
     stop = threading.Event()
@@ -114,23 +115,23 @@ def main(argv: list[str] | None = None) -> int:
     previous = {sig: signal.signal(sig, lambda *_: stop.set()) for sig in signals}
     processes: list[tuple[str, subprocess.Popen]] = []
     try:
-        command = ["-m", "uvicorn", "main:app", "--host", args.host, "--port", str(args.port), "--timeout-graceful-shutdown", "10"]
+        command = ["-m", "app.server", "--host", args.host, "--port", str(args.port), "--timeout-graceful-shutdown", "10"]
         if args.reload:
             command.extend(["--reload", "--reload-dir", str(PROJECT_ROOT / "app")])
         api_process = start_process(command)
         processes.append(("API", api_process))
-        logger.info("Starting API (PID %s)", api_process.pid)
+        logger.info("Starting API (PID {})", api_process.pid)
         if not wait_for_api(api_process, args.host, args.port, stop):
             return 0 if stop.is_set() else 1
         if stop.is_set():
             return 0
         worker = start_process(["-m", "app.worker"])
         processes.append(("Worker", worker))
-        logger.info("Started Worker (PID %s). Press Ctrl+C to stop both services.", worker.pid)
+        logger.info("Started Worker (PID {}). Press Ctrl+C to stop both services.", worker.pid)
         while not stop.wait(0.2):
             for name, process in processes:
                 if process.poll() is not None:
-                    logger.error("%s exited unexpectedly (exit code %s); stopping both services", name, process.returncode)
+                    logger.error("{} exited unexpectedly (exit code {}); stopping both services", name, process.returncode)
                     return process.returncode if process.returncode > 0 else 1
         return 0
     except OSError:

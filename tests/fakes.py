@@ -1,12 +1,14 @@
-"""Persistent upstream fake used only by offline tests."""
+"""Shared offline providers, scripted HTTP responses, and mailbox test helpers."""
 
 import hashlib
 import json
 import re
 import secrets
 import sqlite3
+from collections import deque
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -171,3 +173,107 @@ class FakeProvider:
             db.execute("UPDATE fake_mailboxes SET deleted=1 WHERE upstream_id=?", (mailbox.upstream_id,))
             db.execute("DELETE FROM fake_messages WHERE mailbox_id=?", (mailbox.upstream_id,))
             self._remember(db, "delete", request_id, digest, "deleted")
+
+
+class ConsumingProvider(FakeProvider):
+    def __init__(self, path):
+        super().__init__("consuming", path)
+        self.capabilities = replace(self.capabilities, destructive_receive=True)
+        self.fetches = 0
+        self.fail_parsing = False
+        self.batch_ids = []
+
+    def fetch_messages(self, mailbox):
+        self.fetches += 1
+        return {"body": "private consumed message"}
+
+    def parse_messages(self, mailbox, payload, batch_id):
+        self.batch_ids.append(batch_id)
+        if self.fail_parsing:
+            raise ProviderError("PROVIDER_INVALID_RESPONSE", "Cannot normalize response")
+        return [
+            ProviderMessage(batch_id + ":0", "sender@example.com", [mailbox.email], "subject", payload["body"], "2026-01-01T00:00:00+00:00")
+        ]
+
+
+@dataclass
+class Response:
+    status_code: int
+    data: object = None
+
+    def json(self):
+        if isinstance(self.data, Exception):
+            raise self.data
+        return self.data
+
+
+class ScriptedTransport:
+    def __init__(self, *responses):
+        self.responses = deque(responses)
+        self.calls = []
+        self.sessions = 0
+        self.session_options = []
+
+    def __call__(self, **kwargs):
+        self.sessions += 1
+        self.session_options.append(kwargs)
+        return Session(self)
+
+
+class Session:
+    def __init__(self, transport):
+        self.transport = transport
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def request(self, method, url, **kwargs):
+        self.transport.calls.append({"method": method, "url": url, **kwargs})
+        assert self.transport.responses, "Unexpected extra upstream request"
+        response = self.transport.responses.popleft()
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+def org_listing(*message_ids, email="private@example.test"):
+    return Response(
+        200, {"mailbox": email, "messages": [{"_id": message_id, "bodyPreview": "Only a preview"} for message_id in message_ids]}
+    )
+
+
+def org_detail(message_id, **fields):
+    return Response(
+        200,
+        {
+            "_id": message_id,
+            "from": "sender@example.test",
+            "subject": "Test mail",
+            "receivedAt": 1_700_000_000,
+            "bodyHtml": "<p>Hello</p>",
+            **fields,
+        },
+    )
+
+
+def create_mailbox(service):
+    operation = service.submit("create", uuid4().hex, {"provider": "consuming", "ttl_seconds": 3600, "required_capabilities": ["receive"]})
+    service._execute_operation(service._claim_operation())
+    operation = service.get_operation(operation["id"])
+    return operation["result"]["mailbox_id"], operation
+
+
+def expire(service, mailbox_id):
+    with service.db.connect(write=True) as conn:
+        conn.execute("UPDATE mailboxes SET expires_at='2000-01-01T00:00:00+00:00' WHERE id=?", (mailbox_id,))
+
+
+def preview(client):
+    response = client.get("/v1/mailboxes/cleanup-preview")
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    value = response.json()
+    return {"expected_count": value["count"], "cutoff": value["cutoff"], "revision": value["revision"]}

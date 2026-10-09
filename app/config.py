@@ -1,3 +1,4 @@
+import os
 from dataclasses import dataclass, field
 from math import isfinite
 from pathlib import Path
@@ -5,9 +6,11 @@ from pathlib import Path
 import yaml
 from cryptography.fernet import Fernet
 
+from app.limits import MAX_WORKER_CONCURRENCY, validate_max_ttl_seconds
+
 PROVIDER_OPTIONS = {
-    "temp-mail-org": {"base_url", "timeout_seconds", "impersonate", "proxy"},
-    "tempmail-lol": {"base_url", "timeout_seconds", "impersonate", "proxy"},
+    "temp-mail-org": {"base_url", "timeout_seconds", "impersonate", "proxy", "max_ttl_seconds"},
+    "tempmail-lol": {"base_url", "timeout_seconds", "impersonate", "proxy", "max_ttl_seconds"},
 }
 
 
@@ -64,7 +67,11 @@ class Settings:
     sync_interval_seconds: int = 15
     operation_timeout_seconds: int = 300
     worker_poll_seconds: float = 1
+    create_concurrency: int = 2
+    receive_concurrency: int = 4
     providers: dict[str, ProviderSettings] = field(default_factory=lambda: {name: ProviderSettings() for name in PROVIDER_OPTIONS})
+
+    config_path: Path | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self):
         if not isinstance(self.api_token, str) or len(self.api_token.strip()) < 24:
@@ -80,6 +87,10 @@ class Settings:
         _positive_number(self.sync_interval_seconds, "worker.sync_interval_seconds", integer=True)
         _positive_number(self.operation_timeout_seconds, "worker.operation_timeout_seconds", integer=True)
         _positive_number(self.worker_poll_seconds, "worker.poll_seconds")
+        for name in ("create_concurrency", "receive_concurrency"):
+            value = getattr(self, name)
+            if type(value) is not int or not 1 <= value <= MAX_WORKER_CONCURRENCY:
+                raise ValueError(f"worker.{name} must be an integer between 1 and {MAX_WORKER_CONCURRENCY}")
         _mapping(self.providers, "providers", set(PROVIDER_OPTIONS))
         for name, provider in self.providers.items():
             if not isinstance(provider, ProviderSettings):
@@ -88,22 +99,33 @@ class Settings:
             for key in ("base_url", "impersonate"):
                 if key in options and (not isinstance(options[key], str) or not options[key].strip()):
                     raise ValueError(f"providers.{name}.{key} must be a nonempty string")
+            if "max_ttl_seconds" in options:
+                validate_max_ttl_seconds(options["max_ttl_seconds"])
             if "timeout_seconds" in options:
                 _positive_number(options["timeout_seconds"], f"providers.{name}.timeout_seconds")
 
     @classmethod
-    def from_yaml(cls, path: str | Path = "config.yaml"):
-        path = Path(path).resolve()
+    def from_yaml(cls, path: str | Path | None = None):
+        path = Path(path if path is not None else os.environ.get("TEMP_MAIL_CONFIG", "config.yaml")).resolve()
         try:
             document = yaml.load(path.read_text(encoding="utf-8"), Loader=_ConfigLoader)
         except (yaml.YAMLError, ValueError, UnicodeError):
             # Parser exceptions can contain the offending line, including proxy credentials.
             raise ValueError("Invalid config.yaml: use valid YAML with unique string keys") from None
+        return cls.from_mapping(document, path)
+
+    @classmethod
+    def from_mapping(cls, document: dict, path: str | Path):
+        path = Path(path).resolve()
         document = _mapping(document, "config.yaml", {"app", "worker", "providers"})
         if "app" not in document or "providers" not in document:
             raise ValueError("config.yaml requires app and providers sections")
         app = _mapping(document["app"], "app", {"db_path", "api_token", "encryption_key"})
-        worker = _mapping(document.get("worker", {}), "worker", {"sync_interval_seconds", "operation_timeout_seconds", "poll_seconds"})
+        worker = _mapping(
+            document.get("worker", {}),
+            "worker",
+            {"sync_interval_seconds", "operation_timeout_seconds", "poll_seconds", "create_concurrency", "receive_concurrency"},
+        )
         providers = {}
         for name, config in _mapping(document["providers"], "providers", set(PROVIDER_OPTIONS)).items():
             config = _mapping(config, f"providers.{name}", {"enabled", "index_url", *PROVIDER_OPTIONS[name]})
@@ -122,5 +144,8 @@ class Settings:
             sync_interval_seconds=worker.get("sync_interval_seconds", 15),
             operation_timeout_seconds=worker.get("operation_timeout_seconds", 300),
             worker_poll_seconds=worker.get("poll_seconds", 1),
+            create_concurrency=worker.get("create_concurrency", 2),
+            receive_concurrency=worker.get("receive_concurrency", 4),
             providers=providers,
+            config_path=path,
         )

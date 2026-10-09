@@ -8,6 +8,13 @@ from pathlib import Path
 
 import yaml
 from cryptography.fernet import Fernet
+from loguru import logger
+
+# Keep the documented script invocation working from outside the project too.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from app.logging import configure_logging
 
 
 class _TemplateLoader(yaml.SafeLoader):
@@ -48,16 +55,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", type=Path, default=Path("config.yaml"))
     parser.add_argument("--template", type=Path, default=Path("config.example.yaml"))
     args = parser.parse_args(argv)
+    configure_logging()
     try:
         initialize_config(args.template, args.output)
     except FileExistsError:
-        print("Configuration already exists; refusing to overwrite its keys.", file=sys.stderr)
+        logger.error("Configuration already exists; refusing to overwrite its keys.")
         return 1
     except (OSError, ValueError, yaml.YAMLError):
         # YAML exceptions include source lines; filesystem errors can also reveal private values.
-        print("Cannot initialize configuration; check the template and destination directory.", file=sys.stderr)
+        logger.error("Cannot initialize configuration; check the template and destination directory.")
         return 1
-    print(f"Created configuration: {args.output}")
+    logger.info("Created configuration: {}", args.output)
     return 0
 
 

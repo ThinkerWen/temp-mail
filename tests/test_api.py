@@ -81,6 +81,65 @@ def test_authentication_and_public_health(settings, providers):
         assert client.post("/v1/mailboxes", json={}).status_code == 401
 
 
+@pytest.mark.parametrize("authorization", [None, "Bearer wrong-token"])
+def test_operation_history_requires_authentication(settings, providers, authorization):
+    with TestClient(create_app(settings, Registry(providers))) as client:
+        headers = {"Authorization": authorization} if authorization else {}
+        response = client.get("/v1/operations", headers=headers)
+        assert response.status_code == 401
+        assert response.headers["www-authenticate"] == "Bearer"
+
+
+@pytest.mark.parametrize("params", [{"limit": 0}, {"limit": 101}, {"offset": -1}, {"limit": "invalid"}])
+def test_operation_history_validates_pagination(client, params):
+    response = client.get("/v1/operations", params=params)
+    assert response.status_code == 422
+    assert error_code(response) == "VALIDATION_ERROR"
+
+
+def test_operation_history_is_ordered_paginated_and_owner_scoped(client):
+    assert client.get("/v1/operations").json() == {"items": [], "limit": 50, "offset": 0, "total": 0}
+    payload = {"provider": "fake_a", "required_capabilities": ["receive"], "ttl_seconds": 3600}
+    service = client.app.state.service
+    operations = [service.submit("create", f"history-{index}", payload) for index in range(4)]
+    with service.db.connect(write=True) as conn:
+        conn.execute("UPDATE operations SET created_at='2026-01-01T00:00:00+00:00'")
+        conn.execute("UPDATE operations SET created_at='2026-01-02T00:00:00+00:00' WHERE id=?", (operations[0]["id"],))
+        conn.execute("UPDATE operations SET owner_id='another-owner' WHERE id=?", (operations[3]["id"],))
+    expected = [operations[0]["id"], *sorted([operations[1]["id"], operations[2]["id"]], reverse=True)]
+    first = client.get("/v1/operations", params={"limit": 2}).json()
+    second = client.get("/v1/operations", params={"limit": 2, "offset": 2}).json()
+    assert (first["limit"], first["offset"], first["total"]) == (2, 0, 3)
+    assert (second["limit"], second["offset"], second["total"]) == (2, 2, 3)
+    assert [item["id"] for item in first["items"] + second["items"]] == expected
+    assert client.get("/v1/operations", params={"offset": 10}).json() == {"items": [], "limit": 50, "offset": 10, "total": 3}
+    assert client.get(f"/v1/operations/{operations[3]['id']}").status_code == 404
+
+
+def test_operation_history_survives_app_restart_without_disclosing_payloads(settings, providers):
+    with app_client(settings, providers) as client:
+        mailbox = create_mailbox(client)
+        sent = send_message(client, mailbox, mailbox["email"], key="private-idempotency-key", text="private-mail-body")
+        assert sent.status_code == 202
+        client.app.state.service.run_once()
+        deleted = client.delete(f"/v1/mailboxes/{mailbox['id']}", headers={"Idempotency-Key": "delete-history"})
+        assert deleted.status_code == 202
+        client.app.state.service.run_once()
+        before = client.get("/v1/operations").json()
+        assert before["total"] == 3
+        assert {item["kind"] for item in before["items"]} == {"create", "send", "delete"}
+        assert all(item["status"] == "succeeded" for item in before["items"])
+    with app_client(settings, providers) as restarted:
+        response = restarted.get("/v1/operations")
+        assert response.status_code == 200
+        assert response.json() == before
+        assert "private-idempotency-key" not in response.text
+        assert "private-mail-body" not in response.text
+        for item in response.json()["items"]:
+            assert set(item) == {"id", "kind", "status", "provider_id", "mailbox_id", "result", "error_code", "created_at", "updated_at"}
+            assert item == operation(restarted, item["id"])
+
+
 def test_default_ttl_and_capability_routing(settings, tmp_path):
     path = str(tmp_path / "upstream.sqlite")
     readonly = FakeProvider("readonly", path, can_send=False)
@@ -178,14 +237,40 @@ def test_missing_bound_provider_never_falls_back(settings, providers):
         assert client.get(f"/v1/mailboxes/{target['id']}/messages").json()["items"] == []
 
 
+def test_mailbox_pages_include_total_with_stable_order_and_owner_scope(client):
+    assert client.get("/v1/mailboxes").json() == {"items": [], "limit": 50, "offset": 0, "total": 0}
+    mailboxes = [create_mailbox(client) for _ in range(11)]
+    with client.app.state.service.db.connect(write=True) as conn:
+        conn.execute("UPDATE mailboxes SET created_at='2026-01-01T00:00:00+00:00'")
+        conn.execute("UPDATE mailboxes SET created_at='2026-01-02T00:00:00+00:00' WHERE id=?", (mailboxes[0]["id"],))
+        conn.execute("UPDATE mailboxes SET owner_id='another-owner' WHERE id=?", (mailboxes[-1]["id"],))
+    first = client.get("/v1/mailboxes", params={"limit": 5}).json()
+    second = client.get("/v1/mailboxes", params={"limit": 5, "offset": 5}).json()
+    expected = [mailboxes[0]["id"], *sorted([mailbox["id"] for mailbox in mailboxes[1:-1]], reverse=True)]
+    assert (first["limit"], first["offset"], first["total"], len(first["items"])) == (5, 0, 10, 5)
+    assert (second["limit"], second["offset"], second["total"], len(second["items"])) == (5, 5, 10, 5)
+    assert [mailbox["id"] for mailbox in first["items"] + second["items"]] == expected
+    assert client.get("/v1/mailboxes", params={"limit": 5, "offset": 10}).json() == {"items": [], "limit": 5, "offset": 10, "total": 10}
+
+
 def test_email_lookup_matches_exact_address(client):
     source = create_mailbox(client, "fake_a")
     other = create_mailbox(client, "fake_b")
+    hidden = create_mailbox(client, "fake_a")
+    with client.app.state.service.db.connect(write=True) as conn:
+        conn.execute("UPDATE mailboxes SET owner_id='another-owner', email=? WHERE id=?", (source["email"], hidden["id"]))
     result = client.get("/v1/mailboxes", params={"email": source["email"]})
     assert result.status_code == 200
     assert [mailbox["id"] for mailbox in result.json()["items"]] == [source["id"]]
+    assert result.json()["total"] == 1
+    assert client.get("/v1/mailboxes", params={"email": source["email"], "offset": 1}).json() == {
+        "items": [],
+        "limit": 50,
+        "offset": 1,
+        "total": 1,
+    }
     for address in (source["email"].split("@")[0], "%", "missing@fake-a.test"):
-        assert client.get("/v1/mailboxes", params={"email": address}).json()["items"] == []
+        assert client.get("/v1/mailboxes", params={"email": address}).json() == {"items": [], "limit": 50, "offset": 0, "total": 0}
     assert [mailbox["id"] for mailbox in client.get("/v1/mailboxes", params={"email": other["email"]}).json()["items"]] == [other["id"]]
 
 
@@ -207,25 +292,31 @@ def test_concurrent_idempotent_creation_queues_only_one_operation(client):
     assert len(client.get("/v1/mailboxes").json()["items"]) == 1
 
 
-def test_expired_mailbox_is_inaccessible_and_worker_cleans_local_data(client):
+def test_expired_mailbox_remains_readable_while_worker_revokes_upstream_credentials(client):
     mailbox = create_mailbox(client)
     response = send_message(client, mailbox, mailbox["email"])
     assert response.status_code == 202
     service = client.app.state.service
     service.run_once()
     service.sync_mailbox(mailbox["id"])
-    assert len(client.get(f"/v1/mailboxes/{mailbox['id']}/messages").json()["items"]) == 1
+    page = client.get(f"/v1/mailboxes/{mailbox['id']}/messages").json()
+    assert len(page["items"]) == 1
+    message_path = f"/v1/mailboxes/{mailbox['id']}/messages/{page['items'][0]['id']}"
+    message = client.get(message_path).json()
     with service.db.connect(write=True) as db:
         db.execute("UPDATE mailboxes SET expires_at=? WHERE id=?", ("2000-01-01T00:00:00+00:00", mailbox["id"]))
-    assert client.get(f"/v1/mailboxes/{mailbox['id']}").status_code == 410
-    assert client.get(f"/v1/mailboxes/{mailbox['id']}/messages").status_code == 410
+    assert client.get(f"/v1/mailboxes/{mailbox['id']}").json()["status"] == "expired"
+    assert client.get(f"/v1/mailboxes/{mailbox['id']}/messages").json() == page
+    assert client.get(message_path).json() == message
     assert send_message(client, mailbox, mailbox["email"]).status_code == 410
     service.run_once()
     with service.db.connect() as db:
         row = db.execute("SELECT status, credential_encrypted FROM mailboxes WHERE id=?", (mailbox["id"],)).fetchone()
         assert row["status"] == "expired"
         assert row["credential_encrypted"] is None
-        assert db.execute("SELECT COUNT(*) FROM messages WHERE mailbox_id=?", (mailbox["id"],)).fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM messages WHERE mailbox_id=?", (mailbox["id"],)).fetchone()[0] == 1
+    assert client.get(f"/v1/mailboxes/{mailbox['id']}/messages").json() == page
+    assert client.get(message_path).json() == message
 
 
 def test_delete_revokes_access_and_credentials_stay_private(client, providers):

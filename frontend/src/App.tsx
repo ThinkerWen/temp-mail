@@ -14,30 +14,36 @@ import {
   Plus,
   RefreshCw,
   ShieldCheck,
+  Settings2,
   X,
 } from 'lucide-react';
-import { lazy, Suspense, useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type MouseEvent,
+} from 'react';
 import { api, ApiError, errorMessage } from './api';
-import { Brand, ErrorNotice, Loading } from './components/Common';
+import { Brand, ErrorNotice, Loading, RefreshButton } from './components/Common';
 import Inbox from './components/Inbox';
 import Login from './components/Login';
+import AppearanceControls from './components/AppearanceControls';
+import CreateMailbox from './components/CreateMailbox';
+import CleanupMailboxes from './components/CleanupMailboxes';
+import { useI18n } from './preferences';
+import { sectionPaths, useSection, type Section } from './routing';
 import { clearSession, readSession, useResource, writeSession } from './state';
-import type { CreatePayload, Draft, Operation } from './types';
+import type { Configuration, CreatePayload, Draft, Operation } from './types';
 
-const CreateMailbox = lazy(() => import('./components/CreateMailbox'));
-const Providers = lazy(() =>
-  import('./components/Overview').then((module) => ({ default: module.Providers })),
-);
+const ConfigEditor = lazy(() => import('./components/ConfigEditor'));
+const Providers = lazy(() => import('./components/Providers'));
 const Operations = lazy(() =>
   import('./components/Overview').then((module) => ({ default: module.Operations })),
 );
-
-type Section = 'inbox' | 'providers' | 'operations';
-const headings = {
-  inbox: ['邮箱工作台', '你的收件箱，轻装上阵。', '创建一个临时地址，让每一封来信各归其位。'],
-  providers: ['供应商', '多个来源，一个入口。', '了解已接入的邮箱服务，以及它们支持的能力。'],
-  operations: ['操作记录', '看得见的每一步。', '从提交到完成，跟踪邮箱创建的处理进度。'],
-} satisfies Record<Section, string[]>;
 
 function restoreDraft(): Draft | null {
   const value = readSession<Draft | null>('draft', null);
@@ -55,6 +61,7 @@ function restoreIds(): string[] {
 }
 
 export default function App() {
+  useI18n();
   const [token, setToken] = useState(() => {
     const stored = readSession<unknown>('token', '');
     return typeof stored === 'string' ? stored : '';
@@ -63,25 +70,69 @@ export default function App() {
   const disconnect = useCallback((message = '') => {
     clearSession();
     setToken('');
-    setReason(message);
+    setReason((current) => (current === 'TOKEN_UPDATED' && message === 'UNAUTHORIZED' ? current : message));
   }, []);
   if (!token)
     return (
-      <Login
-        reason={reason}
-        onConnect={(value) => {
-          clearSession();
-          writeSession('token', value);
-          setToken(value);
-          setReason('');
-        }}
-      />
+      <>
+        <Login
+          reason={reason === 'TOKEN_UPDATED' ? '' : reason}
+          onConnect={(value) => {
+            clearSession();
+            writeSession('token', value);
+            setToken(value);
+            setReason('');
+          }}
+        />
+        {reason === 'TOKEN_UPDATED' && (
+          <div className="toast" role="status">
+            <ShieldCheck size={17} />
+            <span>{errorMessage(reason)}</span>
+          </div>
+        )}
+      </>
     );
   return <Workspace key={token} token={token} disconnect={disconnect} />;
 }
 
 function Workspace({ token, disconnect }: { token: string; disconnect: (message?: string) => void }) {
-  const [section, setSection] = useState<Section>('inbox');
+  const t = useI18n();
+  const headings = {
+    inbox: [
+      t('邮箱工作台', 'Inbox'),
+      t('你的收件箱，轻装上阵。', 'Your inbox, without the clutter.'),
+      t(
+        '创建一个临时地址，让每一封来信各归其位。',
+        'Create a temporary address and keep every message in its place.',
+      ),
+    ],
+    providers: [
+      t('供应商', 'Providers'),
+      t('多个来源，一个入口。', 'Multiple providers. One workspace.'),
+      t(
+        '管理已支持的邮箱服务，按需开启和调整配置。',
+        'Manage supported email services and configure them to suit your needs.',
+      ),
+    ],
+    operations: [
+      t('操作记录', 'Activity'),
+      t('看得见的每一步。', 'Every step, in view.'),
+      t(
+        '查看邮箱创建、发送与删除的处理进度和历史结果。',
+        'Review progress and history for mailbox creation, sending, and deletion.',
+      ),
+    ],
+    settings: [
+      t('系统配置', 'Settings'),
+      t('让工作空间，按你的方式运行。', 'Make this workspace your own.'),
+      t(
+        '管理存储、访问与后台同步，保存到本地配置文件。',
+        'Manage storage, access and background sync in your local configuration.',
+      ),
+    ],
+  } satisfies Record<Section, string[]>;
+
+  const [section, navigate] = useSection();
   const [menuOpen, setMenuOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -90,9 +141,18 @@ function Workspace({ token, disconnect }: { token: string; disconnect: (message?
   const draftRef = useRef(draft);
   const submitting = useRef(false);
   const mounted = useRef(true);
+  const tokenChangePending = useRef(false);
+  const [authCheck, setAuthCheck] = useState(0);
+  const onTokenChangePending = useCallback((pending: boolean) => {
+    tokenChangePending.current = pending;
+    if (!pending && mounted.current) setAuthCheck((value) => value + 1);
+  }, []);
   const [operationIds, setOperationIds] = useState(restoreIds);
+  const [operationOffset, setOperationOffset] = useState(0);
+  const [operationLookupId, setOperationLookupId] = useState<string | null>(null);
   const operationCache = useRef(new Map<string, Operation>());
   const handled = useRef(new Set<string>());
+  const restoredOperations = useRef(new Set(operationIds));
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [messageId, setMessageId] = useState<string | null>(null);
   const [mailboxOffset, setMailboxOffset] = useState(0);
@@ -101,7 +161,8 @@ function Workspace({ token, disconnect }: { token: string; disconnect: (message?
   const [searchEmail, setSearchEmail] = useState('');
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [now, setNow] = useState(Date.now());
-  const [toast, setToast] = useState('');
+  const [toast, setToast] = useState<'created' | 'submitted' | 'cleaned' | ''>('');
+  const [cleanedCount, setCleanedCount] = useState(0);
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -131,13 +192,14 @@ function Workspace({ token, disconnect }: { token: string; disconnect: (message?
   );
   const selectedMailbox = mailboxes.data?.items.find((item) => item.id === selectedId);
   const mailboxActive = selectedMailbox?.status === 'active' && Date.parse(selectedMailbox.expires_at) > now;
+  const mailboxReadable = selectedMailbox && selectedMailbox.status !== 'deleted';
   const messages = useResource(
-    mailboxActive ? `messages:${selectedId}:${messageOffset}` : null,
+    mailboxReadable ? `messages:${selectedId}:${messageOffset}` : null,
     (signal) => api.messages(token, selectedId!, messageOffset, signal),
-    autoRefresh ? 5000 : 0,
+    autoRefresh && mailboxActive ? 5000 : 0,
   );
   const message = useResource(
-    mailboxActive && messageId ? `message:${selectedId}:${messageId}` : null,
+    mailboxReadable && messageId ? `message:${selectedId}:${messageId}` : null,
     (signal) => api.message(token, selectedId!, messageId!, signal),
   );
   const operations = useResource(
@@ -154,7 +216,7 @@ function Workspace({ token, disconnect }: { token: string; disconnect: (message?
           } catch (error) {
             if (error instanceof ApiError && error.status === 401) throw error;
             if (signal.aborted) throw error;
-            return { item: cached, error: `${id}：${errorMessage(error)}` };
+            return { item: cached, error: { id, cause: error } };
           }
         }),
       );
@@ -166,6 +228,14 @@ function Workspace({ token, disconnect }: { token: string; disconnect: (message?
     2000,
   );
   const tracked = operations.data?.items ?? [];
+  const history = useResource(
+    section === 'operations' && !operationLookupId ? `operation-history:${operationOffset}` : null,
+    (signal) => api.operations(token, operationOffset, signal),
+    2000,
+  );
+  const lookupOperation = operationLookupId
+    ? (tracked.find((item) => item.id === operationLookupId) ?? operationCache.current.get(operationLookupId))
+    : null;
   const pending = tracked.filter((item) => ['pending', 'running'].includes(item.status));
   const providerList = providers.data?.providers ?? [];
   const globalError = [
@@ -174,10 +244,18 @@ function Workspace({ token, disconnect }: { token: string; disconnect: (message?
     messages.error,
     message.error,
     operations.error,
+    history.error,
   ].find((error) => error instanceof ApiError && error.status === 401);
   useEffect(() => {
-    if (globalError) disconnect('访问令牌无效或已变更，请重新连接。');
-  }, [globalError, disconnect]);
+    if (globalError instanceof ApiError && !tokenChangePending.current) disconnect(globalError.code);
+  }, [globalError, disconnect, authCheck]);
+  const onConfigurationSaved = useCallback(
+    (_config: Configuration, options?: { tokenChanged: boolean }) => {
+      if (options?.tokenChanged) disconnect('TOKEN_UPDATED');
+      else providers.refresh();
+    },
+    [disconnect, providers.refresh],
+  );
 
   const selectMailbox = useCallback((id: string) => {
     setSelectedId(id);
@@ -200,22 +278,26 @@ function Workspace({ token, disconnect }: { token: string; disconnect: (message?
       setQuery(email ?? '');
       setSearchEmail(email ?? '');
       selectMailbox(id);
-      setSection('inbox');
+      navigate('inbox');
       mailboxes.refresh();
     },
-    [mailboxes.refresh, selectMailbox],
+    [mailboxes.refresh, selectMailbox, navigate],
   );
   useEffect(() => {
+    // Previously completed operations must not redirect a restored page on reload.
+    tracked.forEach((item) => {
+      if (restoredOperations.current.delete(item.id) && ['succeeded', 'failed'].includes(item.status)) {
+        handled.current.add(item.id);
+      }
+    });
     const finished = tracked.filter(
       (item) => ['succeeded', 'failed'].includes(item.status) && !handled.current.has(item.id),
     );
     finished.forEach((item) => handled.current.add(item.id));
-    const success = finished.find(
-      (item) => item.status === 'succeeded' && (item.mailbox_id || item.result?.mailbox_id),
-    );
+    const success = finished.find((item) => item.status === 'succeeded' && item.mailbox_id);
     if (success) {
-      openMailbox((success.mailbox_id ?? success.result?.mailbox_id)!, success.result?.email);
-      setToast('邮箱已创建，可以开始收件了。');
+      openMailbox(success.mailbox_id!, success.result?.email);
+      setToast('created');
     }
   }, [operations.data, openMailbox]);
 
@@ -244,7 +326,7 @@ function Workspace({ token, disconnect }: { token: string; disconnect: (message?
       writeSession('draft', null);
       track(operation);
       setCreateOpen(false);
-      setToast('创建请求已提交，正在等待后台处理。');
+      setToast('submitted');
     } catch (error) {
       if (!mounted.current) return;
       setCreateError(error);
@@ -252,7 +334,7 @@ function Workspace({ token, disconnect }: { token: string; disconnect: (message?
         draftRef.current = null;
         setDraft(null);
         writeSession('draft', null);
-        if (error.status === 401) disconnect(error.message);
+        if (error.status === 401) disconnect(error.code);
       }
     } finally {
       submitting.current = false;
@@ -272,6 +354,7 @@ function Workspace({ token, disconnect }: { token: string; disconnect: (message?
     messages.refresh();
     message.refresh();
     operations.refresh();
+    history.refresh();
     setNow(Date.now());
   }
   const heading = headings[section];
@@ -279,70 +362,92 @@ function Workspace({ token, disconnect }: { token: string; disconnect: (message?
     (item) => item.status === 'active' && Date.parse(item.expires_at) > now,
   ).length;
   const connectionError = !!providers.error || !!mailboxes.error;
-  function chooseSection(value: Section) {
-    setSection(value);
+  function chooseSection(event: MouseEvent<HTMLAnchorElement>, value: Section) {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    navigate(value);
     setMenuOpen(false);
   }
   return (
     <div className="app-shell">
       {menuOpen && (
-        <button className="mobile-scrim" aria-label="关闭菜单" onClick={() => setMenuOpen(false)} />
+        <button
+          className="mobile-scrim"
+          aria-label={t('关闭菜单', 'Close menu')}
+          onClick={() => setMenuOpen(false)}
+        />
       )}
       <aside className={`sidebar ${menuOpen ? 'open' : ''}`}>
         <Brand />
         <div className="workspace-label">
-          个人工作空间
+          {t('个人工作空间', 'Personal workspace')}
           <Chip size="sm" variant="soft">
             WORKSPACE
           </Chip>
         </div>
-        <span className="nav-caption">工作台</span>
-        <nav aria-label="主导航">
-          <Button
-            variant="tertiary"
-            className={`nav-link ${section === 'inbox' ? 'active' : ''}`}
-            onPress={() => chooseSection('inbox')}
+        <span className="nav-caption">{t('工作台', 'Workspace')}</span>
+        <nav aria-label={t('主导航', 'Main navigation')}>
+          <a
+            href={sectionPaths.inbox}
+            aria-current={section === 'inbox' ? 'page' : undefined}
+            className={`button button--tertiary nav-link ${section === 'inbox' ? 'active' : ''}`}
+            onClick={(event) => chooseSection(event, 'inbox')}
           >
             <InboxIcon size={19} />
-            <span>邮箱工作台</span>
-            <ChevronRight size={14} className="nav-arrow" />
-          </Button>
-          <Button
-            variant="tertiary"
-            className={`nav-link ${section === 'providers' ? 'active' : ''}`}
-            onPress={() => chooseSection('providers')}
+            <span>{t('邮箱工作台', 'Inbox')}</span>
+          </a>
+          <a
+            href={sectionPaths.providers}
+            aria-current={section === 'providers' ? 'page' : undefined}
+            className={`button button--tertiary nav-link ${section === 'providers' ? 'active' : ''}`}
+            onClick={(event) => chooseSection(event, 'providers')}
           >
             <Layers size={19} />
-            <span>供应商</span>
+            <span>{t('供应商', 'Providers')}</span>
             <span className="nav-count">{providerList.length}</span>
-          </Button>
-          <Button
-            variant="tertiary"
-            className={`nav-link ${section === 'operations' ? 'active' : ''}`}
-            onPress={() => chooseSection('operations')}
+          </a>
+          <a
+            href={sectionPaths.operations}
+            aria-current={section === 'operations' ? 'page' : undefined}
+            className={`button button--tertiary nav-link ${section === 'operations' ? 'active' : ''}`}
+            onClick={(event) => chooseSection(event, 'operations')}
           >
             <History size={19} />
-            <span>操作记录</span>
+            <span>{t('操作记录', 'Activity')}</span>
             {pending.length > 0 && <span className="nav-count">{pending.length}</span>}
-          </Button>
+          </a>
+          <a
+            href={sectionPaths.settings}
+            aria-current={section === 'settings' ? 'page' : undefined}
+            className={`button button--tertiary nav-link ${section === 'settings' ? 'active' : ''}`}
+            onClick={(event) => chooseSection(event, 'settings')}
+          >
+            <Settings2 size={19} />
+            <span>{t('系统配置', 'Settings')}</span>
+          </a>
         </nav>
         <div className="sidebar-bottom">
           <div className="sidebar-tip">
             <div>
               <ShieldCheck size={18} />
-              <strong>短暂的地址，专注的收件</strong>
+              <strong>{t('短暂的地址，专注的收件', 'Temporary addresses, focused inbox')}</strong>
             </div>
-            <p>临时邮箱会在有效期后过期，记得及时保存重要内容。</p>
+            <p>
+              {t(
+                '邮箱到期后停止收发，历史邮件保留至手动清除。',
+                'Mailboxes stop sending and receiving when they expire. Message history is kept until you clear it.',
+              )}
+            </p>
           </div>
           <a className="sidebar-docs" href="/docs" target="_blank" rel="noreferrer">
             <Code2 size={17} />
-            <span>API 文档</span>
+            <span>{t('API 文档', 'API docs')}</span>
             <ArrowUpRight size={14} />
           </a>
           <div className="workspace-owner">
             <span className="owner-avatar">T</span>
             <div>
-              <strong>本地工作空间</strong>
+              <strong>{t('本地工作空间', 'Local workspace')}</strong>
               <small>Temp Mail</small>
             </div>
             <span className="tiny-dot" />
@@ -357,28 +462,38 @@ function Workspace({ token, disconnect }: { token: string; disconnect: (message?
               variant="tertiary"
               size="sm"
               className="mobile-menu"
-              aria-label="打开菜单"
+              aria-label={t('打开菜单', 'Open menu')}
               onPress={() => setMenuOpen(true)}
             >
               <Menu size={19} />
             </Button>
-            <span>工作台</span>
+            <span>{t('工作台', 'Workspace')}</span>
             <ChevronRight size={13} />
             <strong>{heading[0]}</strong>
           </div>
           <div className="header-actions">
             <span className={`connection-status ${connectionError ? 'offline' : ''}`}>
               <span />
-              {connectionError ? '连接异常' : providers.loading && !providers.data ? '连接中' : 'API 已连接'}
+              {connectionError
+                ? t('连接异常', 'Connection error')
+                : providers.loading && !providers.data
+                  ? t('连接中', 'Connecting')
+                  : t('API 已连接', 'API connected')}
             </span>
+            <AppearanceControls />
             <span className="header-divider" />
-            <Button size="sm" variant="tertiary" onPress={() => disconnect()} aria-label="退出登录">
+            <Button
+              size="sm"
+              variant="tertiary"
+              onPress={() => disconnect()}
+              aria-label={t('退出登录', 'Log out')}
+            >
               <LogOut size={16} />
-              <span className="logout-label">退出</span>
+              <span className="logout-label">{t('退出', 'Log out')}</span>
             </Button>
           </div>
         </header>
-        <main className="main-content" id="main-content">
+        <main className="main-content page-transition" id="main-content" key={section}>
           <div className="page-heading">
             <div>
               <div className="page-eyebrow">
@@ -388,10 +503,12 @@ function Workspace({ token, disconnect }: { token: string; disconnect: (message?
               <h1>{heading[1]}</h1>
               <p>{heading[2]}</p>
             </div>
-            <Button className="primary-action" onPress={() => setCreateOpen(true)}>
-              <Plus size={18} />
-              {draft ? '继续上次创建' : '新建邮箱'}
-            </Button>
+            {section === 'inbox' && (
+              <Button className="primary-action" onPress={() => setCreateOpen(true)}>
+                <Plus size={18} />
+                {draft ? t('继续上次创建', 'Resume creation') : t('新建邮箱', 'New mailbox')}
+              </Button>
+            )}
           </div>
           <ErrorNotice error={providers.error} retry={providers.refresh} />
           {section === 'inbox' && (
@@ -403,31 +520,33 @@ function Workspace({ token, disconnect }: { token: string; disconnect: (message?
                   </div>
                   <div>
                     <span>
-                      使用中的邮箱 <small>本页</small>
+                      {t('使用中的邮箱', 'Active mailboxes')} <small>{t('本页', 'This page')}</small>
                     </span>
                     <strong>{mailboxes.data ? String(loadedActive).padStart(2, '0') : '—'}</strong>
                   </div>
-                  <span className="stat-detail">随时准备收件</span>
+                  <span className="stat-detail">{t('随时准备收件', 'Ready to receive')}</span>
                 </div>
                 <div className="stat">
                   <div className="stat-icon violet">
                     <Layers size={20} />
                   </div>
                   <div>
-                    <span>已接入供应商</span>
+                    <span>{t('已接入供应商', 'Available providers')}</span>
                     <strong>{providers.data ? String(providerList.length).padStart(2, '0') : '—'}</strong>
                   </div>
-                  <span className="stat-detail">统一管理</span>
+                  <span className="stat-detail">{t('统一管理', 'All in one place')}</span>
                 </div>
                 <div className="stat">
                   <div className="stat-icon green">
                     <RefreshCw size={19} />
                   </div>
                   <div>
-                    <span>页面自动刷新</span>
-                    <strong className="stat-text">{autoRefresh ? '每 5 秒' : '已暂停'}</strong>
+                    <span>{t('页面自动刷新', 'Auto-refresh')}</span>
+                    <strong className="stat-text">
+                      {autoRefresh ? t('每 5 秒', 'Every 5 seconds') : t('已暂停', 'Paused')}
+                    </strong>
                   </div>
-                  <span className="stat-detail">读取本地收件</span>
+                  <span className="stat-detail">{t('读取本地收件', 'Reads cached mail')}</span>
                 </div>
               </div>
               {(pending.length > 0 ||
@@ -436,21 +555,38 @@ function Workspace({ token, disconnect }: { token: string; disconnect: (message?
                   <Clock3 size={17} />
                   <span>
                     {pending.length
-                      ? `${pending.length} 个邮箱正在创建，完成后会自动显示。`
-                      : '有创建请求未完成，可在操作记录中查看原因。'}
+                      ? t(
+                          `${pending.length} 个邮箱正在创建，完成后会自动显示。`,
+                          `${pending.length} mailbox request(s) in progress. New mailboxes appear when ready.`,
+                        )
+                      : t(
+                          '有创建请求未完成，可在操作记录中查看原因。',
+                          'Some requests are incomplete. Check Activity for details.',
+                        )}
                   </span>
-                  <Button size="sm" variant="tertiary" onPress={() => setSection('operations')}>
-                    查看操作
+                  <Button size="sm" variant="tertiary" onPress={() => navigate('operations')}>
+                    {t('查看操作', 'View activity')}
                     <ArrowUpRight size={14} />
                   </Button>
                 </div>
               )}
               <div className="inbox-section-heading">
                 <div>
-                  <h2>所有邮箱</h2>
-                  <span>每一封来信，都有一个位置。</span>
+                  <h2>{t('所有邮箱', 'All mailboxes')}</h2>
+                  <span>{t('每一封来信，都有一个位置。', 'A place for every message.')}</span>
                 </div>
                 <div className="inbox-controls">
+                  <CleanupMailboxes
+                    token={token}
+                    onUnauthorized={disconnect}
+                    onCleared={(count) => {
+                      setMailboxOffset(0);
+                      selectMailbox('');
+                      refresh();
+                      setCleanedCount(count);
+                      setToast('cleaned');
+                    }}
+                  />
                   <Button
                     size="sm"
                     variant="tertiary"
@@ -460,17 +596,25 @@ function Workspace({ token, disconnect }: { token: string; disconnect: (message?
                     <span className={`toggle-track ${autoRefresh ? 'on' : ''}`}>
                       <span />
                     </span>
-                    <span>自动刷新</span>
+                    <span>{t('自动刷新', 'Auto-refresh')}</span>
                   </Button>
-                  <Button size="sm" variant="secondary" onPress={refresh} aria-label="刷新邮箱">
-                    <RefreshCw size={14} className={mailboxes.loading ? 'spin' : ''} />
-                    刷新
-                  </Button>
+                  <RefreshButton
+                    refresh={refresh}
+                    loading={[providers, mailboxes, messages, message, operations].some(
+                      (resource) => resource.loading,
+                    )}
+                    failed={
+                      [providers, mailboxes, messages, message, operations].some(
+                        (resource) => !!resource.error,
+                      ) || !!operations.data?.errors.length
+                    }
+                  />
                 </div>
               </div>
               {searchEmail && (
                 <div className="search-filter">
-                  正在查询：<strong>{searchEmail}</strong>
+                  {t('正在查询：', 'Searching: ')}
+                  <strong>{searchEmail}</strong>
                   <Button
                     size="sm"
                     variant="tertiary"
@@ -480,7 +624,7 @@ function Workspace({ token, disconnect }: { token: string; disconnect: (message?
                       setMailboxOffset(0);
                     }}
                   >
-                    清除查询
+                    {t('清除查询', 'Clear search')}
                     <X size={13} />
                   </Button>
                 </div>
@@ -512,11 +656,14 @@ function Workspace({ token, disconnect }: { token: string; disconnect: (message?
               <div className="workspace-footer">
                 <span>
                   <ShieldCheck size={13} />
-                  消息由后台定期同步，页面刷新不会直接请求供应商。
+                  {t(
+                    '消息由后台定期同步，页面刷新不会直接请求供应商。',
+                    'Mail syncs in the background. Refreshing reads the local cache.',
+                  )}
                 </span>
                 <a href="/docs" target="_blank" rel="noreferrer">
                   <CircleHelp size={13} />
-                  接口说明
+                  {t('接口说明', 'API reference')}
                   <ArrowUpRight size={12} />
                 </a>
               </div>
@@ -524,23 +671,53 @@ function Workspace({ token, disconnect }: { token: string; disconnect: (message?
           )}
           {section === 'providers' && (
             <Suspense fallback={<Loading />}>
-              <Providers providers={providerList} />
+              <Providers token={token} disconnect={disconnect} onSaved={onConfigurationSaved} />
+            </Suspense>
+          )}
+          {section === 'settings' && (
+            <Suspense fallback={<Loading />}>
+              <ConfigEditor
+                token={token}
+                disconnect={disconnect}
+                onSaved={onConfigurationSaved}
+                onTokenChangePending={onTokenChangePending}
+              />
             </Suspense>
           )}
           {section === 'operations' && (
             <Suspense fallback={<Loading />}>
               <Operations
-                operations={tracked}
-                loading={operations.loading}
-                error={operations.error ?? operations.data?.errors.join('；')}
-                retry={operations.refresh}
+                operations={
+                  operationLookupId ? (lookupOperation ? [lookupOperation] : []) : (history.data?.items ?? [])
+                }
+                loading={operationLookupId ? operations.loading : history.loading}
+                error={
+                  operationLookupId
+                    ? (operations.error ??
+                      operations.data?.errors
+                        .filter(({ id }) => id === operationLookupId)
+                        .map(({ id, cause }) => `${id}: ${errorMessage(cause)}`)
+                        .join('; '))
+                    : history.error
+                }
+                retry={operationLookupId ? operations.refresh : history.refresh}
+                offset={operationOffset}
+                total={history.data?.total ?? 0}
+                changePage={setOperationOffset}
+                filtered={!!operationLookupId}
+                clearFilter={() => setOperationLookupId(null)}
                 addOperation={async (id) => {
                   try {
                     const item = await api.operation(token, id);
-                    if (mounted.current) track(item);
+                    if (mounted.current) {
+                      // Looking up completed history must not open a mailbox automatically.
+                      if (['succeeded', 'failed'].includes(item.status)) handled.current.add(item.id);
+                      track(item);
+                      setOperationLookupId(item.id);
+                    }
                   } catch (error) {
                     if (mounted.current && error instanceof ApiError && error.status === 401)
-                      disconnect(error.message);
+                      disconnect(error.code);
                     throw error;
                   }
                 }}
@@ -550,24 +727,35 @@ function Workspace({ token, disconnect }: { token: string; disconnect: (message?
           )}
         </main>
       </div>
-      {createOpen && (
-        <Suspense fallback={<Loading label="正在打开创建窗口…" />}>
-          <CreateMailbox
-            open={createOpen}
-            setOpen={setCreateOpen}
-            providers={providerList}
-            draft={draft}
-            busy={creating}
-            error={createError}
-            submit={create}
-          />
-        </Suspense>
-      )}
+      <CreateMailbox
+        open={createOpen}
+        setOpen={setCreateOpen}
+        providers={providerList}
+        draft={draft}
+        busy={creating}
+        error={createError}
+        submit={create}
+      />
       {toast && (
         <div role="status" className="toast">
           <ShieldCheck size={17} />
-          <span>{toast}</span>
-          <Button isIconOnly size="sm" variant="tertiary" aria-label="关闭提示" onPress={() => setToast('')}>
+          <span>
+            {toast === 'cleaned'
+              ? t(`已清除 ${cleanedCount} 个失效邮箱。`, `Cleared ${cleanedCount} expired mailbox(es).`)
+              : toast === 'created'
+                ? t('邮箱已创建，可以开始收件了。', 'Mailbox created. You can start receiving mail.')
+                : t(
+                    '创建请求已提交，正在等待后台处理。',
+                    'Request submitted. Waiting for background processing.',
+                  )}
+          </span>
+          <Button
+            isIconOnly
+            size="sm"
+            variant="tertiary"
+            aria-label={t('关闭提示', 'Dismiss notification')}
+            onPress={() => setToast('')}
+          >
             <X size={14} />
           </Button>
         </div>

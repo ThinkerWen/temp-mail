@@ -1,12 +1,13 @@
 import hashlib
 import json
-import logging
+from collections.abc import Callable, Collection
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from typing import cast
 from uuid import uuid4
 
 from cryptography.fernet import Fernet, InvalidToken
+from loguru import logger
 
 from app.config import Settings
 from app.db import Database, utcnow
@@ -15,7 +16,6 @@ from app.providers import ProviderError, ProviderMailbox, Registry
 from app.providers.base import DestructiveReceiveProvider
 from app.providers.factory import build_registry
 
-logger = logging.getLogger(__name__)
 OWNER_ID = "default"
 
 
@@ -29,11 +29,12 @@ def provider_error(exc: ProviderError) -> ServiceError:
 
 
 class Service:
-    def __init__(self, settings: Settings, registry: Registry | None = None):
+    def __init__(self, settings: Settings, registry: Registry | None = None, *, db: Database | None = None, cipher: Fernet | None = None):
         self.settings = settings
-        self.db = Database(settings.db_path)
-        self.db.initialize()
-        self.cipher = Fernet(settings.encryption_key.encode())
+        self.db = db if db is not None else Database(settings.db_path)
+        if db is None:
+            self.db.initialize()
+        self.cipher = cipher if cipher is not None else Fernet(settings.encryption_key.encode())
         self.registry = registry if registry is not None else build_registry(settings)
 
     @staticmethod
@@ -50,28 +51,82 @@ class Service:
             result["status"] = "expired"
         return result
 
-    def _mailbox(self, conn, mailbox_id: str, *, active: bool = True):
+    def _mailbox(self, conn, mailbox_id: str, *, active: bool = True, allow_expired: bool = False):
         row = conn.execute("SELECT * FROM mailboxes WHERE id=? AND owner_id=?", (mailbox_id, OWNER_ID)).fetchone()
         if row is None:
             raise ServiceError("MAILBOX_NOT_FOUND", "Mailbox not found", 404)
         if active and row["status"] == "deleted":
             raise ServiceError("MAILBOX_DELETED", "Mailbox has been deleted", 410)
-        if active and (row["status"] == "expired" or row["expires_at"] <= utcnow()):
+        if active and not allow_expired and (row["status"] == "expired" or row["expires_at"] <= utcnow()):
             raise ServiceError("MAILBOX_EXPIRED", "Mailbox has expired", 410)
         return row
 
     def get_mailbox(self, mailbox_id: str) -> dict:
         with self.db.connect() as conn:
-            return self.mailbox_view(self._mailbox(conn, mailbox_id))
+            return self.mailbox_view(self._mailbox(conn, mailbox_id, allow_expired=True))
 
     def list_mailboxes(self, limit: int, offset: int, email: str | None = None) -> dict:
-        query, args = "SELECT * FROM mailboxes WHERE owner_id=?", [OWNER_ID]
+        where, args = "WHERE owner_id=?", [OWNER_ID]
         if email is not None:
-            query += " AND email=?"
+            where += " AND email=?"
             args.append(email)
         with self.db.connect() as conn:
-            rows = conn.execute(query + " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?", [*args, limit, offset]).fetchall()
-        return {"items": [self.mailbox_view(row) for row in rows], "limit": limit, "offset": offset}
+            # Count and page share one snapshot while concurrent workers create or expire mailboxes.
+            conn.execute("BEGIN")
+            total = conn.execute(f"SELECT COUNT(*) FROM mailboxes {where}", args).fetchone()[0]
+            rows = conn.execute(
+                f"SELECT * FROM mailboxes {where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?", [*args, limit, offset]
+            ).fetchall()
+        return {"items": [self.mailbox_view(row) for row in rows], "limit": limit, "offset": offset, "total": total}
+
+    @staticmethod
+    def _cleanup_candidates(conn, cutoff: str) -> list[str]:
+        rows = conn.execute(
+            "SELECT id FROM mailboxes WHERE owner_id=? AND created_at<=? AND (status='deleted' OR expires_at<=?) ORDER BY id",
+            (OWNER_ID, cutoff, cutoff),
+        ).fetchall()
+        return [row["id"] for row in rows]
+
+    @staticmethod
+    def _cleanup_revision(mailbox_ids: list[str], cutoff: str) -> str:
+        return hashlib.sha256(encode({"owner_id": OWNER_ID, "cutoff": cutoff, "mailbox_ids": mailbox_ids}).encode()).hexdigest()
+
+    def mailbox_cleanup_preview(self) -> dict:
+        cutoff = utcnow()
+        with self.db.connect() as conn:
+            mailbox_ids = self._cleanup_candidates(conn, cutoff)
+        return {"count": len(mailbox_ids), "cutoff": cutoff, "revision": self._cleanup_revision(mailbox_ids, cutoff)}
+
+    def cleanup_mailboxes(self, cutoff: str, expected_count: int, revision: str) -> dict:
+        try:
+            parsed = datetime.fromisoformat(cutoff)
+            if parsed.tzinfo is None or parsed > datetime.now(UTC):
+                raise ValueError("Invalid cleanup cutoff")
+            cutoff = parsed.astimezone(UTC).isoformat()
+        except (ValueError, OverflowError):
+            raise ServiceError("CLEANUP_INVALID_CUTOFF", "Cleanup cutoff must be a past timestamp with a timezone", 422) from None
+        with self.db.connect(write=True) as conn:
+            mailbox_ids = self._cleanup_candidates(conn, cutoff)
+            if len(mailbox_ids) != expected_count or self._cleanup_revision(mailbox_ids, cutoff) != revision:
+                raise ServiceError("CLEANUP_CHANGED", "The mailboxes eligible for cleanup changed; please confirm again", 409)
+            arguments = [(mailbox_id,) for mailbox_id in mailbox_ids]
+            conn.executemany("DELETE FROM messages WHERE mailbox_id=?", arguments)
+            conn.executemany("DELETE FROM message_batches WHERE mailbox_id=?", arguments)
+            # Keep operation history and its original result, while releasing the foreign key to deleted metadata.
+            conn.executemany("UPDATE operations SET mailbox_id=NULL WHERE mailbox_id=?", arguments)
+            conn.executemany("DELETE FROM mailboxes WHERE id=?", arguments)
+        return {"deleted_count": len(mailbox_ids)}
+
+    def list_operations(self, limit: int, offset: int) -> dict:
+        with self.db.connect() as conn:
+            # Keep the count and page consistent while the worker or another request updates operations.
+            conn.execute("BEGIN")
+            total = conn.execute("SELECT COUNT(*) FROM operations WHERE owner_id=?", (OWNER_ID,)).fetchone()[0]
+            rows = conn.execute(
+                "SELECT * FROM operations WHERE owner_id=? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+                (OWNER_ID, limit, offset),
+            ).fetchall()
+        return {"items": [self.operation_view(row) for row in rows], "limit": limit, "offset": offset, "total": total}
 
     def get_operation(self, operation_id: str) -> dict:
         with self.db.connect() as conn:
@@ -114,7 +169,7 @@ class Service:
 
     def list_messages(self, mailbox_id: str, limit: int, offset: int) -> dict:
         with self.db.connect() as conn:
-            mailbox = self._mailbox(conn, mailbox_id)
+            mailbox = self._mailbox(conn, mailbox_id, allow_expired=True)
             rows = conn.execute(
                 """SELECT id, mailbox_id, sender, recipients, subject, received_at FROM messages
                 WHERE mailbox_id=? ORDER BY received_at DESC, id DESC LIMIT ? OFFSET ?""",
@@ -125,7 +180,7 @@ class Service:
 
     def get_message(self, mailbox_id: str, message_id: str) -> dict:
         with self.db.connect() as conn:
-            self._mailbox(conn, mailbox_id)
+            self._mailbox(conn, mailbox_id, allow_expired=True)
             row = conn.execute("SELECT * FROM messages WHERE id=? AND mailbox_id=?", (message_id, mailbox_id)).fetchone()
         if row is None:
             raise ServiceError("MESSAGE_NOT_FOUND", "Message not found in this mailbox", 404)
@@ -138,17 +193,21 @@ class Service:
             raise ServiceError("CREDENTIAL_UNAVAILABLE", "Cannot decrypt mailbox credentials", 503) from exc
         return ProviderMailbox(row["upstream_id"], row["email"], credential, row["expires_at"])
 
-    def _claim_operation(self):
+    def _claim_operation(self, exclude: Collection[str] = ()):
         now = utcnow()
         cutoff = (datetime.now(UTC) - timedelta(seconds=self.settings.operation_timeout_seconds)).isoformat()
+        exclusions = f" AND id NOT IN ({','.join('?' for _ in exclude)})" if exclude else ""
         with self.db.connect(write=True) as conn:
             # A dead worker may already have performed the upstream side effect. Never replay blindly.
             conn.execute(
                 """UPDATE operations SET status='unknown', error_code='WORKER_INTERRUPTED', updated_at=?
-                WHERE status='running' AND updated_at<?""",
-                (now, cutoff),
+                WHERE status='running' AND updated_at<?"""
+                + exclusions,
+                (now, cutoff, *exclude),
             )
-            row = conn.execute("SELECT * FROM operations WHERE status='pending' ORDER BY created_at, id LIMIT 1").fetchone()
+            row = conn.execute(
+                "SELECT * FROM operations WHERE status='pending'" + exclusions + " ORDER BY created_at, id LIMIT 1", tuple(exclude)
+            ).fetchone()
             if row:
                 conn.execute("UPDATE operations SET status='running', updated_at=? WHERE id=?", (now, row["id"]))
                 return dict(row)
@@ -241,7 +300,7 @@ class Service:
         except TimeoutError:
             self._fail_operation(operation["id"], "PROVIDER_TIMEOUT", uncertain=upstream_started)
         except Exception:
-            logger.error("Operation %s failed; upstream_started=%s", operation["id"], upstream_started)
+            logger.error("Operation {} failed; upstream_started={}", operation["id"], upstream_started)
             self._fail_operation(operation["id"], "INTERNAL_ERROR", uncertain=upstream_started)
 
     def expire_mailboxes(self) -> int:
@@ -249,33 +308,59 @@ class Service:
             rows = conn.execute("SELECT id FROM mailboxes WHERE status='active' AND expires_at<=?", (utcnow(),)).fetchall()
             for row in rows:
                 conn.execute("UPDATE mailboxes SET status='expired', credential_encrypted=NULL WHERE id=?", (row["id"],))
-                conn.execute("DELETE FROM messages WHERE mailbox_id=?", (row["id"],))
-                conn.execute("DELETE FROM message_batches WHERE mailbox_id=?", (row["id"],))
             return len(rows)
 
     def _stage_messages(self, mailbox_id: str, provider: DestructiveReceiveProvider) -> None:
-        # Serialize consuming fetches across workers using this database. A saved batch is replayed first.
-        # Holding the write lock during HTTP is deliberate; the current deployment uses one worker.
-        with self.db.connect(write=True) as conn:
+        # The caller holds the mailbox lock; HTTP must never hold SQLite's global write lock.
+        with self.db.connect() as conn:
             mailbox = self._mailbox(conn, mailbox_id)
             if conn.execute("SELECT 1 FROM message_batches WHERE mailbox_id=?", (mailbox_id,)).fetchone():
                 return
-            payload = provider.fetch_messages(self._upstream_mailbox(mailbox))
+        payload = provider.fetch_messages(self._upstream_mailbox(mailbox))
+        encrypted = self.cipher.encrypt(encode(payload).encode()).decode()
+        with self.db.connect(write=True) as conn:
+            self._mailbox(conn, mailbox_id)
             conn.execute(
                 "INSERT INTO message_batches (mailbox_id, id, payload_encrypted, created_at) VALUES (?, ?, ?, ?)",
-                (mailbox_id, uuid4().hex, self.cipher.encrypt(encode(payload).encode()).decode(), utcnow()),
+                (mailbox_id, uuid4().hex, encrypted, utcnow()),
             )
 
-    def sync_mailbox(self, mailbox_id: str) -> bool:
+    def due_mailboxes(self, limit: int, exclude: Collection[str] = ()) -> list[str]:
+        exclusions = f" AND id NOT IN ({','.join('?' for _ in exclude)})" if exclude else ""
+        now = utcnow()
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                "SELECT id FROM mailboxes WHERE status='active' AND next_sync_at<=? AND expires_at>?"
+                + exclusions
+                + " ORDER BY next_sync_at, id LIMIT ?",
+                (now, now, *exclude, limit),
+            ).fetchall()
+        return [row["id"] for row in rows]
+
+    def sync_mailbox(self, mailbox_id: str, *, scheduled: bool = False) -> bool:
+        with self.db.mailbox_lock(mailbox_id) as acquired:
+            if not acquired:
+                return False
+            return self._sync_mailbox(mailbox_id, scheduled=scheduled)
+
+    def _sync_mailbox(self, mailbox_id: str, *, scheduled: bool) -> bool:
         try:
             with self.db.connect() as conn:
                 mailbox = dict(self._mailbox(conn, mailbox_id))
+            if scheduled and mailbox["next_sync_at"] > utcnow():
+                return False
             provider = self.registry.get(mailbox["provider_id"])
             if not provider.capabilities.receive:
                 raise ServiceError("CAPABILITY_UNSUPPORTED", "Provider does not support receiving", 422)
             if provider.capabilities.destructive_receive:
                 self._stage_messages(mailbox_id, cast(DestructiveReceiveProvider, provider))
-                messages = []
+                with self.db.connect() as conn:
+                    self._mailbox(conn, mailbox_id)
+                    batch = conn.execute("SELECT * FROM message_batches WHERE mailbox_id=?", (mailbox_id,)).fetchone()
+                if batch is None:
+                    return False
+                payload = json.loads(self.cipher.decrypt(batch["payload_encrypted"].encode()))
+                messages = cast(DestructiveReceiveProvider, provider).parse_messages(self._upstream_mailbox(mailbox), payload, batch["id"])
             else:
                 messages = provider.list_messages(self._upstream_mailbox(mailbox))
             now = utcnow()
@@ -283,15 +368,6 @@ class Service:
             with self.db.connect(write=True) as conn:
                 # Deletion or expiry during the upstream request must not recreate the local cache.
                 self._mailbox(conn, mailbox_id)
-                if provider.capabilities.destructive_receive:
-                    batch = conn.execute("SELECT * FROM message_batches WHERE mailbox_id=?", (mailbox_id,)).fetchone()
-                    # Another worker may already have committed the saved batch.
-                    if batch is None:
-                        return True
-                    payload = json.loads(self.cipher.decrypt(batch["payload_encrypted"].encode()))
-                    messages = cast(DestructiveReceiveProvider, provider).parse_messages(
-                        self._upstream_mailbox(mailbox), payload, batch["id"]
-                    )
                 conn.executemany(
                     """INSERT INTO messages (id, mailbox_id, upstream_id, sender, recipients, subject, text, received_at, cached_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(mailbox_id, upstream_id) DO NOTHING""",
@@ -321,7 +397,7 @@ class Service:
         except TimeoutError:
             code = "PROVIDER_TIMEOUT"
         except Exception:
-            logger.error("Mailbox sync failed for %s", mailbox_id)
+            logger.error("Mailbox sync failed for {}", mailbox_id)
             code = "INTERNAL_ERROR"
         with self.db.connect(write=True) as conn:
             row = conn.execute("SELECT sync_failures FROM mailboxes WHERE id=? AND status='active'", (mailbox_id,)).fetchone()
@@ -335,14 +411,12 @@ class Service:
                 )
         return False
 
-    def run_once(self) -> dict:
+    def run_once(self, refresh: Callable[[], "Service"] | None = None) -> dict:
         expired = self.expire_mailboxes()
         operation = self._claim_operation()
+        # A newly claimed job may use a provider configured after this tick started.
+        active = refresh() if refresh is not None else self
         if operation:
-            self._execute_operation(operation)
-        with self.db.connect() as conn:
-            due = conn.execute(
-                "SELECT id FROM mailboxes WHERE status='active' AND next_sync_at<=? ORDER BY next_sync_at LIMIT 20", (utcnow(),)
-            ).fetchall()
-        synced = sum(self.sync_mailbox(row["id"]) for row in due)
+            active._execute_operation(operation)
+        synced = sum(active.sync_mailbox(mailbox_id, scheduled=True) for mailbox_id in active.due_mailboxes(20))
         return {"operations": int(operation is not None), "synced": synced, "expired": expired}

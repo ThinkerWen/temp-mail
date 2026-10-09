@@ -13,6 +13,37 @@ export interface Provider {
   id: string;
   capabilities: Capabilities;
 }
+export interface ProviderConfig {
+  id: string;
+  enabled: boolean;
+  index_url: string;
+  base_url: string;
+  timeout_seconds: number;
+  impersonate: string;
+  proxy_configured: boolean;
+  max_ttl_seconds: number;
+  capabilities: Capabilities;
+}
+export interface Configuration {
+  revision: string;
+  restart_required: boolean;
+  restart_required_fields: string[];
+  app: { db_path: string; api_token_configured: boolean; encryption_key_configured: boolean };
+  worker: {
+    sync_interval_seconds: number;
+    operation_timeout_seconds: number;
+    poll_seconds: number;
+    create_concurrency: number;
+    receive_concurrency: number;
+  };
+  providers: ProviderConfig[];
+}
+export interface ConfigurationPatch {
+  revision: string;
+  app?: { db_path?: string; api_token?: string };
+  worker?: Partial<Configuration['worker']>;
+  providers?: (Omit<ProviderConfig, 'proxy_configured' | 'capabilities'> & { proxy?: string | null })[];
+}
 export interface Mailbox {
   id: string;
   email: string;
@@ -39,6 +70,7 @@ export interface Page<T> {
   items: T[];
   limit: number;
   offset: number;
+  total?: number;
 }
 export interface MessagePage extends Page<MessageSummary> {
   last_synced_at: string | null;
@@ -63,4 +95,17 @@ export interface Operation {
   error_code: string | null;
   created_at: string;
   updated_at: string;
+}
+export interface OperationPage extends Page<Operation> {
+  total: number;
+}
+export interface CleanupPreview {
+  count: number;
+  cutoff: string;
+  revision: string;
+}
+export interface CleanupRequest {
+  cutoff: string;
+  expected_count: number;
+  revision: string;
 }

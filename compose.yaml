@@ -8,22 +8,31 @@ x-runtime: &runtime
   init: true
   working_dir: /app
   stop_grace_period: 30s
-  volumes:
-    - type: bind
-      source: ./config.yaml
-      target: /app/config.yaml
-      read_only: true
-      bind:
-        create_host_path: false
-    - type: bind
-      source: ./data
-      target: /app/data
-      bind:
-        create_host_path: false
+  environment:
+    TEMP_MAIL_CONFIG: /app/config/config.yaml
+
+x-config-volume: &config-volume
+  type: bind
+  source: ./config
+  target: /app/config
+  bind:
+    create_host_path: false
+
+x-data-volume: &data-volume
+  type: bind
+  source: ./data
+  target: /app/config/data
+  bind:
+    create_host_path: false
 
 services:
   api:
     <<: *runtime
+    volumes:
+      - *config-volume
+      - *data-volume
+      - <<: *data-volume
+        target: /app/data
     ports:
       - "127.0.0.1:8000:8000"
     healthcheck:
@@ -39,6 +48,12 @@ services:
 
   worker:
     <<: *runtime
+    volumes:
+      - <<: *config-volume
+        read_only: true
+      - *data-volume
+      - <<: *data-volume
+        target: /app/data
     command: ["python", "-m", "app.worker"]
     depends_on:
       api:
@@ -54,7 +69,7 @@ services:
       - python
       - scripts/init_config.py
       - --output
-      - /workspace/config.yaml
+      - /workspace/config/config.yaml
       - --template
       - /app/config.example.yaml
     volumes:

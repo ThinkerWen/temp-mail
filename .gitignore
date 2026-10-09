@@ -164,6 +164,7 @@ cython_debug/
 .idea/
 .ruff_cache/
 config.yaml
+/config/
 data/
 *.db
 *.db-shm

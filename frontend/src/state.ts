@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { getLocale, t } from './preferences';
 
 const PREFIX = 'temp-mail.';
 export function readSession<T>(key: string, fallback: T): T {
@@ -66,11 +67,11 @@ export function useResource<T>(key: string | null, load: (signal: AbortSignal) =
 }
 
 export function formatDate(value: string | null, short = false) {
-  if (!value) return '尚未同步';
+  if (!value) return t('尚未同步', 'Not synced yet');
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return '时间未知';
+  if (Number.isNaN(date.getTime())) return t('时间未知', 'Unknown time');
   return new Intl.DateTimeFormat(
-    'zh-CN',
+    getLocale() === 'zh' ? 'zh-CN' : 'en-US',
     short
       ? { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }
       : { year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false },
@@ -78,10 +79,31 @@ export function formatDate(value: string | null, short = false) {
 }
 export function remaining(expires: string, now: number) {
   const minutes = Math.ceil((Date.parse(expires) - now) / 60_000);
-  if (minutes <= 0) return '已过期';
-  if (minutes < 60) return `剩余 ${minutes} 分钟`;
-  return `剩余 ${Math.floor(minutes / 60)} 小时${minutes % 60 ? ` ${minutes % 60} 分钟` : ''}`;
+  if (minutes <= 0) return t('已过期', 'Expired');
+  if (minutes < 60)
+    return t(`剩余 ${minutes} 分钟`, `${minutes} ${minutes === 1 ? 'minute' : 'minutes'} left`);
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return t(
+    `剩余 ${hours} 小时${rest ? ` ${rest} 分钟` : ''}`,
+    `${hours} ${hours === 1 ? 'hour' : 'hours'}${rest ? ` ${rest} ${rest === 1 ? 'minute' : 'minutes'}` : ''} left`,
+  );
 }
 export function providerName(id: string) {
   return { 'temp-mail-org': 'Temp Mail', 'tempmail-lol': 'TempMail.lol' }[id] ?? id;
+}
+
+export function formatDuration(seconds: number) {
+  const units: [number, string, string][] = [
+    [86400, '天', 'day'],
+    [3600, '小时', 'hour'],
+    [60, '分钟', 'minute'],
+  ];
+  for (const [divisor, zh, en] of units) {
+    if (seconds >= divisor && seconds % divisor === 0) {
+      const count = seconds / divisor;
+      return t(`${count} ${zh}`, `${count} ${en}${count === 1 ? '' : 's'}`);
+    }
+  }
+  return t(`${seconds} 秒`, `${seconds} second${seconds === 1 ? '' : 's'}`);
 }
