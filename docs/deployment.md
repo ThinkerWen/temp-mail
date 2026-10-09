@@ -1,18 +1,23 @@
 # Docker 部署
 
-需要 Docker 和 Compose v2，以下命令在项目根目录执行。部署包含 API 和 Worker 两个容器，共享配置与 SQLite 数据。镜像会通过 pnpm 构建前端，宿主机无需安装 Node.js；本地运行见 [README](../README.md#本地启动)。
+需要 Docker 和 Compose v2。部署直接拉取 Docker Hub 发布的镜像，包含网页、API 和 Worker，宿主机无需安装 Python、Node.js 或下载项目源码。API 和 Worker 分别运行，共享配置与 SQLite 数据。源码开发见 [前端开发与构建](frontend.md#开发与构建)。
+
+镜像地址：[`designerwang/temp-mail`](https://hub.docker.com/r/designerwang/temp-mail)，默认标签为 `latest`。
 
 ## 首次部署
 
-Linux/macOS：
+创建一个部署目录，在该目录下载 Compose 文件。以下命令适用于 Linux/macOS：
 
 ```bash
-docker compose build
+mkdir -p temp-mail
+cd temp-mail
+curl -fsSL https://raw.githubusercontent.com/ThinkerWen/temp-mail/main/compose.yaml -o compose.yaml
 mkdir -p config data
+docker compose --profile tools pull
 docker compose run --rm --user "$(id -u):$(id -g)" init
 ```
 
-`init` 根据镜像内模板生成 `config/config.yaml`，创建 API 令牌与 Fernet 密钥，拒绝覆盖已有文件。`--user` 使文件归当前宿主用户所有。Windows 请先创建 `config`、`data` 目录，再执行 `docker compose run --rm init`。
+`--profile tools pull` 同时准备运行服务与初始化工具所用的镜像。`init` 根据镜像内模板生成 `config/config.yaml`，创建 API 令牌与 Fernet 密钥，拒绝覆盖已有文件。`--user` 使文件归当前宿主用户所有。Windows 可手动下载 Compose 文件、创建 `config` 和 `data` 目录，拉取镜像后执行 `docker compose run --rm init`。
 
 按需编辑供应商配置，然后启动：
 
@@ -25,20 +30,25 @@ docker compose ps
 
 默认端口绑定为 `127.0.0.1:8000:8000`，仅宿主机可访问。需要其他访问地址时，调整 Compose 端口绑定。
 
+Compose 顶部的 `x-image` 统一指定三个服务使用的镜像，默认使用 `latest`。需要固定版本时，将这一处的 `latest` 改为 Docker Hub 上已发布的版本标签；通过 Git 标签发布的镜像使用同名标签。API、Worker 与初始化工具应使用同一版本。
+
 ## 已有配置迁移
 
-旧版直接挂载根目录的 `config.yaml`。新版需要挂载整个配置目录，以支持网页原子保存。已有配置和数据库时跳过 `init`：
+先将部署目录的 Compose 文件更新为仓库中的 [compose.yaml](../compose.yaml)，保留自己的端口、挂载等配置。新版通过 `x-image` 统一使用 Docker Hub 镜像。
+
+若旧版直接挂载根目录的 `config.yaml`，需迁移为整个配置目录挂载，以支持网页原子保存。已有配置和数据库时跳过 `init`：
 
 ```bash
 docker compose stop api worker
 mkdir -p config data
 cp -p -n config.yaml config/config.yaml
-docker compose up -d --build
+docker compose --profile tools pull
+docker compose up -d
 ```
 
 `cp -p -n` 保留权限且不覆盖已有目标；目标文件已存在时，先确认它是要使用的配置。Windows 可手动复制。原 `./data` 无需移动，默认 `app.db_path: ./data/temp-mail.db` 无需修改。
 
-Docker 此后使用 `config/config.yaml`，本地启动默认使用根目录 `config.yaml`，两者不会自动同步。不要为已有数据库重新生成加密密钥，否则原邮箱凭据和暂存收件批次无法解密。已经使用新目录布局的部署直接按“更新与重启”操作。
+Docker 此后使用 `config/config.yaml`，源码运行默认使用根目录 `config.yaml`，两者不会自动同步。不要为已有数据库重新生成加密密钥，否则原邮箱凭据和暂存收件批次无法解密。已经使用新目录布局的部署直接按“更新与重启”操作。
 
 ## 挂载与权限
 
@@ -65,7 +75,7 @@ app:
 
 ## 更新与重启
 
-网页“供应商”和“系统配置”的保存会写入宿主机 `config/config.yaml`。大多数配置支持热更新，无需重建镜像；字段含义、生效时机与保存规则见 [配置说明](configuration.md)。
+网页“供应商”和“系统配置”的保存会写入宿主机 `config/config.yaml`。大多数配置支持热更新；字段含义、生效时机与保存规则见 [配置说明](configuration.md)。
 
 数据库路径或加密密钥变化后，须同时重启两个服务：
 
@@ -75,10 +85,10 @@ docker compose restart api worker
 
 更改数据库路径不会迁移数据，新的路径仍须位于持久化挂载内。更换密钥不会重新加密已有凭据，网页也不提供密钥编辑。
 
-更新项目源码后重建并启动，前端也随镜像更新：
+升级时拉取已发布镜像并重新创建服务，网页会随镜像一起更新。使用固定版本时，先修改 `x-image` 的标签：
 
 ```bash
-docker compose build
+docker compose --profile tools pull
 docker compose up -d
 docker compose ps
 docker compose logs --tail=100 api worker
@@ -111,7 +121,7 @@ docker compose logs --tail=100 api worker
 docker compose logs -f worker
 ```
 
-后端日志由 Loguru 输出到标准错误，Docker 负责收集和轮转，应用不创建日志文件。
+后端日志由 Loguru 输出到标准错误，由 Docker 日志驱动收集，应用不创建日志文件。日志轮转按宿主机的 Docker 日志配置执行。
 
 | 现象 | 检查项 |
 | --- | --- |

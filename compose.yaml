@@ -1,9 +1,9 @@
 name: temp-mail
 
+x-image: &image docker.io/designerwang/temp-mail:latest
+
 x-runtime: &runtime
-  image: temp-mail:local
-  build:
-    context: .
+  image: *image
   restart: unless-stopped
   init: true
   working_dir: /app
@@ -61,9 +61,7 @@ services:
 
   init:
     profiles: [tools]
-    image: temp-mail:local
-    build:
-      context: .
+    image: *image
     working_dir: /app
     command:
       - python

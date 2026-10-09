@@ -1,6 +1,6 @@
 # 配置说明
 
-配置保存在 YAML 文件中。完整示例见 [config.example.yaml](../config.example.yaml)，首次生成配置的步骤见 [README](../README.md#本地启动)。
+配置保存在 YAML 文件中。完整示例见 [config.example.yaml](../config.example.yaml)，首次生成配置的步骤见 [Docker 部署](deployment.md#首次部署)；源码开发见 [开发与构建](frontend.md#开发与构建)。
 
 ## 配置文件
 

@@ -35,7 +35,16 @@
 
 ## 开发与构建
 
-需要 Node.js 22.13+ 和 pnpm 11.0.9。后端环境准备见 [本地启动](../README.md#本地启动)。
+源码开发需要 Python 3.12+、uv、Node.js 22.13+ 和 pnpm 11.0.9。使用 Docker Hub 镜像部署时无需安装这些工具，见 [部署指南](deployment.md)。
+
+克隆仓库后，在项目根目录准备后端环境与配置：
+
+```bash
+uv sync --dev
+uv run python scripts/init_config.py
+```
+
+初始化仅用于首次运行，已有根目录 `config.yaml` 时跳过。网页使用其中的 `app.api_token` 登录；源码开发默认读取根目录配置，与 Docker 的 `config/config.yaml` 相互独立。
 
 在项目根目录启动 API 和 Worker：
 
@@ -61,9 +70,11 @@ pnpm build
 
 产物写入 `frontend/dist/`，由 API 提供静态访问。随后在项目根目录运行 `uv run python run.py`，打开 `http://127.0.0.1:8000/` 即可使用，无需运行 Vite。
 
-Docker 会一并构建前端，部署步骤见 [Docker 部署](deployment.md)。修改前端源码后需重新构建产物或镜像。使用反向代理时，除 `/assets` 静态资源和 API 路径外，也需转发上表中的页面路径，保证直接访问和刷新可用。
+Docker Hub 发布镜像已包含前端产物，拉取新版镜像即可一起更新页面。源码开发时，修改前端后需重新运行 `pnpm build`，或使用 Vite 开发服务实时预览。使用反向代理时，除 `/assets` 静态资源和 API 路径外，也需转发上表中的页面路径，保证直接访问和刷新可用。
 
 ## 验证
+
+在项目根目录运行 `uv run pytest` 检查后端。测试使用本地模拟供应商，无需创建真实邮箱。
 
 在 `frontend/` 执行：
 

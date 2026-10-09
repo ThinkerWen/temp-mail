@@ -1,12 +1,22 @@
 <p align="center">
-  <img src="docs/assets/logo.svg" width="112" height="112" alt="Temp Mail 图标" />
+  <a href="https://github.com/ThinkerWen/temp-mail">
+    <img src="docs/assets/logo.svg" width="128" height="128" alt="Temp Mail 图标" />
+  </a>
 </p>
 
 <h1 align="center">Temp Mail</h1>
 
+<p align="center"><strong>简体中文</strong> · <a href="README_en.md">English</a></p>
+
 <p align="center"><strong>给收件箱，加一些隐私。</strong></p>
 
 <p align="center">一个可自部署的临时邮箱聚合服务，通过网页和统一 API 管理多个供应商的邮箱。</p>
+
+<p align="center">
+  <a href="https://github.com/ThinkerWen/temp-mail/actions/workflows/workflow.yml"><img src="https://github.com/ThinkerWen/temp-mail/actions/workflows/workflow.yml/badge.svg" alt="Docker 镜像发布" /></a>
+  <a href="https://hub.docker.com/r/designerwang/temp-mail"><img src="https://img.shields.io/docker/pulls/designerwang/temp-mail?logo=docker&label=Docker%20Hub&color=2496ED" alt="Docker Hub 拉取次数" /></a>
+  <a href="https://github.com/ThinkerWen/temp-mail/tags"><img src="https://img.shields.io/github/v/tag/ThinkerWen/temp-mail?label=version&color=f97316" alt="版本标签" /></a>
+</p>
 
 ---
 
@@ -32,15 +42,16 @@
 首次部署，在项目根目录执行：
 
 ```bash
-docker compose build
+mkdir -p temp-mail
+cd temp-mail
+curl -fsSL https://raw.githubusercontent.com/ThinkerWen/temp-mail/main/compose.yaml -o compose.yaml
 mkdir -p config data
+docker pull designerwang/temp-mail:latest
 docker compose run --rm --user "$(id -u):$(id -g)" init
 docker compose up -d
 ```
 
 打开 `http://127.0.0.1:8000/`，使用 `config/config.yaml` 中的 `app.api_token` 登录。
-
-以上命令适用于 Linux / macOS。Windows、已有配置迁移、备份与升级见 [部署指南](docs/deployment.md)。已有数据库请保留原配置及加密密钥。
 
 ## 本地启动
 
@@ -54,10 +65,6 @@ pnpm --dir frontend build
 uv run python run.py
 ```
 
-打开 `http://127.0.0.1:8000/`，使用根目录 `config.yaml` 中的 `app.api_token` 登录。初始化命令仅用于首次运行，已有配置时跳过。
-
-`run.py` 同时启动 API 和 Worker，按 Ctrl+C 结束。开发时使用 `uv run python run.py --reload`，另开终端运行 `pnpm --dir frontend dev`；详见 [前端开发](docs/frontend.md#开发与构建)。
-
 ## 文档
 
 | 文档 | 内容 |
@@ -69,6 +76,8 @@ uv run python run.py
 | [架构设计](docs/design.md) | 数据模型、任务调度与供应商扩展 |
 
 配置模板见 [config.example.yaml](config.example.yaml)，请求示例见 [test_main.http](test_main.http)。服务启动后可访问 `/docs` 查看交互 API 文档。
+
+Windows、远程访问、已有配置迁移与备份见 [部署指南](docs/deployment.md)。已有数据库请跳过初始化，保留原配置及加密密钥。
 
 ## 开发检查
 
