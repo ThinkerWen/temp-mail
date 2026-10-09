@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 export const sectionPaths = {
+  index: '/index',
   inbox: '/inbox',
   providers: '/providers',
   operations: '/operations',
@@ -34,7 +35,7 @@ function canNavigate() {
 function readSection(): Section {
   const path = window.location.pathname.replace(/\/$/, '');
   return (
-    (Object.keys(sectionPaths) as Section[]).find((section) => sectionPaths[section] === path) ?? 'inbox'
+    (Object.keys(sectionPaths) as Section[]).find((section) => sectionPaths[section] === path) ?? 'index'
   );
 }
 

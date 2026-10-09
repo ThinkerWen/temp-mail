@@ -6,6 +6,7 @@ import type {
   Configuration,
   ConfigurationPatch,
   CreatePayload,
+  DashboardData,
   Mailbox,
   Message,
   MessagePage,
@@ -157,6 +158,8 @@ export async function request<T>(token: string, path: string, init: RequestInit 
 }
 
 export const api = {
+  dashboard: (token: string, signal?: AbortSignal) =>
+    request<DashboardData>(token, '/v1/dashboard', { signal }),
   cleanupPreview: (token: string, signal?: AbortSignal) =>
     request<CleanupPreview>(token, '/v1/mailboxes/cleanup-preview', { signal }),
   cleanupMailboxes: (token: string, payload: CleanupRequest, signal?: AbortSignal) =>

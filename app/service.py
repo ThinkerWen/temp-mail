@@ -128,6 +128,74 @@ class Service:
             ).fetchall()
         return {"items": [self.operation_view(row) for row in rows], "limit": limit, "offset": offset, "total": total}
 
+    def dashboard(self) -> dict:
+        now = datetime.now(UTC)
+        generated_at = now.isoformat()
+        day_start = (now - timedelta(days=6)).replace(hour=0, minute=0, second=0, microsecond=0)
+        activity = {(day_start + timedelta(days=index)).date().isoformat(): {"mailboxes": 0, "messages": 0} for index in range(7)}
+        with self.db.connect() as conn:
+            # All dashboard panels describe the same snapshot, without reading credentials or message bodies.
+            conn.execute("BEGIN")
+            mailboxes = dict(
+                conn.execute(
+                    """SELECT COUNT(*) AS total,
+                    COUNT(CASE WHEN status='active' AND expires_at>? THEN 1 END) AS active,
+                    COUNT(CASE WHEN status='expired' OR (status='active' AND expires_at<=?) THEN 1 END) AS expired,
+                    COUNT(CASE WHEN status='deleted' THEN 1 END) AS deleted,
+                    COUNT(CASE WHEN status='active' AND expires_at>? AND last_sync_error_code IS NOT NULL THEN 1 END) AS sync_errors,
+                    MAX(CASE WHEN status!='deleted' THEN last_synced_at END) AS last_synced_at
+                    FROM mailboxes WHERE owner_id=?""",
+                    (generated_at, generated_at, generated_at, OWNER_ID),
+                ).fetchone()
+            )
+            messages = dict(
+                conn.execute(
+                    """SELECT COUNT(*) AS total,
+                    COUNT(CASE WHEN m.cached_at>=? AND m.cached_at<=? THEN 1 END) AS received_24h
+                    FROM messages m JOIN mailboxes b ON b.id=m.mailbox_id WHERE b.owner_id=? AND b.status!='deleted'""",
+                    ((now - timedelta(hours=24)).isoformat(), generated_at, OWNER_ID),
+                ).fetchone()
+            )
+            operations = dict.fromkeys(("pending", "running", "succeeded", "failed", "unknown"), 0)
+            for row in conn.execute("SELECT status, COUNT(*) AS count FROM operations WHERE owner_id=? GROUP BY status", (OWNER_ID,)):
+                operations[row["status"]] = row["count"]
+            operations["total"] = sum(operations.values())
+            recent = conn.execute(
+                """SELECT id, kind, status, provider_id, mailbox_id, result, error_code, created_at, updated_at
+                FROM operations WHERE owner_id=? ORDER BY updated_at DESC, id DESC LIMIT 3""",
+                (OWNER_ID,),
+            ).fetchall()
+            for row in conn.execute(
+                """SELECT SUBSTR(created_at, 1, 10) AS date, COUNT(*) AS count FROM mailboxes
+                WHERE owner_id=? AND created_at>=? AND created_at<=? GROUP BY date""",
+                (OWNER_ID, day_start.isoformat(), generated_at),
+            ):
+                activity[row["date"]]["mailboxes"] = row["count"]
+            for row in conn.execute(
+                """SELECT SUBSTR(m.cached_at, 1, 10) AS date, COUNT(*) AS count FROM messages m
+                JOIN mailboxes b ON b.id=m.mailbox_id
+                WHERE b.owner_id=? AND b.status!='deleted' AND m.cached_at>=? AND m.cached_at<=? GROUP BY date""",
+                (OWNER_ID, day_start.isoformat(), generated_at),
+            ):
+                activity[row["date"]]["messages"] = row["count"]
+            providers = conn.execute(
+                """SELECT provider_id AS id, COUNT(*) AS mailboxes,
+                COUNT(CASE WHEN status='active' AND expires_at>? THEN 1 END) AS active
+                FROM mailboxes WHERE owner_id=? GROUP BY provider_id ORDER BY mailboxes DESC, provider_id""",
+                (generated_at, OWNER_ID),
+            ).fetchall()
+        last_synced_at = mailboxes.pop("last_synced_at")
+        return {
+            "generated_at": generated_at,
+            "mailboxes": mailboxes,
+            "messages": messages,
+            "operations": operations,
+            "last_synced_at": last_synced_at,
+            "activity": [{"date": date, **counts} for date, counts in activity.items()],
+            "recent_operations": [self.operation_view(row) for row in recent],
+            "provider_stats": [dict(row) for row in providers],
+        }
+
     def get_operation(self, operation_id: str) -> dict:
         with self.db.connect() as conn:
             row = conn.execute("SELECT * FROM operations WHERE id=? AND owner_id=?", (operation_id, OWNER_ID)).fetchone()

@@ -66,10 +66,12 @@ export function RefreshButton({
   refresh,
   loading,
   failed,
+  label,
 }: {
   refresh: () => void;
   loading: boolean;
   failed: boolean;
+  label?: string;
 }) {
   const t = useI18n();
   const [stage, setStage] = useState<'idle' | 'refreshing' | 'done' | 'failed'>('idle');
@@ -96,7 +98,7 @@ export function RefreshButton({
       variant="secondary"
       className="refresh-button"
       data-state={stage}
-      aria-label={t('刷新邮箱', 'Refresh mailboxes')}
+      aria-label={label ?? t('刷新邮箱', 'Refresh mailboxes')}
       isPending={stage === 'refreshing'}
       onPress={() => {
         setMinimumElapsed(false);

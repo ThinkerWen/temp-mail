@@ -99,6 +99,23 @@ export interface Operation {
 export interface OperationPage extends Page<Operation> {
   total: number;
 }
+export interface DashboardData {
+  generated_at: string;
+  mailboxes: { total: number; active: number; expired: number; deleted: number; sync_errors: number };
+  messages: { total: number; received_24h: number };
+  operations: {
+    total: number;
+    pending: number;
+    running: number;
+    succeeded: number;
+    failed: number;
+    unknown: number;
+  };
+  last_synced_at: string | null;
+  activity: { date: string; mailboxes: number; messages: number }[];
+  recent_operations: Operation[];
+  provider_stats: { id: string; mailboxes: number; active: number }[];
+}
 export interface CleanupPreview {
   count: number;
   cutoff: string;

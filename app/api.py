@@ -18,6 +18,7 @@ from app.runtime import Runtime
 from app.schemas import (
     CleanupMailboxes,
     CreateMailbox,
+    DashboardView,
     MailboxCleanupPreview,
     MailboxCleanupResult,
     MailboxPage,
@@ -53,7 +54,7 @@ def create_app(settings: Settings | None = None, registry: Registry | None = Non
         def frontend():
             return FileResponse(index_file, headers={"Cache-Control": "no-cache"})
 
-        for path in ("/", "/inbox", "/providers", "/operations", "/settings"):
+        for path in ("/", "/index", "/inbox", "/providers", "/operations", "/settings"):
             app.add_api_route(path, frontend, methods=["GET"], include_in_schema=False)
 
         if (FRONTEND_DIST / "assets").is_dir():
@@ -76,7 +77,7 @@ def create_app(settings: Settings | None = None, registry: Registry | None = Non
     @app.exception_handler(ServiceError)
     async def on_service_error(request: Request, exc: ServiceError):
         headers = {"WWW-Authenticate": "Bearer"} if exc.status_code == 401 else {}
-        if request.url.path == "/v1/config":
+        if request.url.path in {"/v1/config", "/v1/dashboard"}:
             headers["Cache-Control"] = "no-store"
         return JSONResponse({"error": {"code": exc.code, "message": exc.message}}, status_code=exc.status_code, headers=headers)
 
@@ -94,7 +95,10 @@ def create_app(settings: Settings | None = None, registry: Registry | None = Non
 
     @app.exception_handler(sqlite3.OperationalError)
     async def on_database_error(request: Request, exc: sqlite3.OperationalError):
-        return JSONResponse({"error": {"code": "STORAGE_UNAVAILABLE", "message": "Storage is temporarily unavailable"}}, status_code=503)
+        headers = {"Cache-Control": "no-store"} if request.url.path == "/v1/dashboard" else {}
+        return JSONResponse(
+            {"error": {"code": "STORAGE_UNAVAILABLE", "message": "Storage is temporarily unavailable"}}, status_code=503, headers=headers
+        )
 
     @app.get("/health/live")
     def live():
@@ -125,6 +129,11 @@ def create_app(settings: Settings | None = None, registry: Registry | None = Non
     @app.get("/v1/capabilities", dependencies=auth)
     def capabilities(svc: Annotated[Service, Depends(service)]):
         return {"providers": [{"id": provider.id, "capabilities": asdict(provider.capabilities)} for provider in svc.registry.all()]}
+
+    @app.get("/v1/dashboard", response_model=DashboardView, dependencies=auth)
+    def dashboard(response: Response, svc: Annotated[Service, Depends(service)]):
+        response.headers["Cache-Control"] = "no-store"
+        return svc.dashboard()
 
     @app.post("/v1/mailboxes", status_code=202, response_model=OperationView, dependencies=auth)
     def create_mailbox(body: CreateMailbox, idempotency_key: IdempotencyKey, svc: Annotated[Service, Depends(service)]):

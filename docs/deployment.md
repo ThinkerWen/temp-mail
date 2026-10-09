@@ -1,10 +1,10 @@
 # Docker 部署
 
-使用 Docker 和 Compose v2，在项目根目录操作。部署包含一个 API 容器和一个 Worker 容器，共享 SQLite 数据及配置，默认访问地址为 `http://127.0.0.1:8000`。HeroUI 前端在镜像构建阶段通过 pnpm 构建，产物由 API 提供，不增加容器或端口；宿主机无需安装 Node.js 或 pnpm。
+需要 Docker 和 Compose v2，以下命令在项目根目录执行。部署包含 API 和 Worker 两个容器，共享配置与 SQLite 数据。镜像会通过 pnpm 构建前端，宿主机无需安装 Node.js；本地运行见 [README](../README.md#本地启动)。
 
-## 首次启动
+## 首次部署
 
-先构建本地镜像，再生成配置。以下命令适用于 Linux 和 macOS：
+Linux/macOS：
 
 ```bash
 docker compose build
@@ -12,22 +12,22 @@ mkdir -p config data
 docker compose run --rm --user "$(id -u):$(id -g)" init
 ```
 
-`init` 从镜像内的 `config.example.yaml` 生成宿主机 `config/config.yaml`，创建 API 令牌与 Fernet 密钥。已有配置时拒绝覆盖。`--user` 使生成文件归当前宿主用户所有；Windows 可使用 `docker compose run --rm init`，并预先在项目根目录创建 `config` 和 `data` 文件夹。
+`init` 根据镜像内模板生成 `config/config.yaml`，创建 API 令牌与 Fernet 密钥，拒绝覆盖已有文件。`--user` 使文件归当前宿主用户所有。Windows 请先创建 `config`、`data` 目录，再执行 `docker compose run --rm init`。
 
-按需编辑 `config/config.yaml` 中的供应商配置，然后启动：
+按需编辑供应商配置，然后启动：
 
 ```bash
 docker compose up -d
 docker compose ps
 ```
 
-打开 `http://127.0.0.1:8000/`，输入 `config/config.yaml` 中的 `app.api_token` 登录，随后可创建邮箱、查看收件及修改配置。页面中的刷新读取本地缓存，Worker 负责向供应商同步。
+打开 `http://127.0.0.1:8000/`，使用 `config/config.yaml` 中的 `app.api_token` 登录。API 文档位于 `/docs`。Worker 等待 API 健康后启动，负责执行创建操作与收件同步；网页刷新读取本地缓存。
 
-交互 API 文档保留在 `http://127.0.0.1:8000/docs`，在 Authorize 中填写同一令牌即可调用。请求示例见 [README](../README.md#创建与收件)，前端行为见 [前端说明](frontend.md)。
+默认端口绑定为 `127.0.0.1:8000:8000`，仅宿主机可访问。需要其他访问地址时，调整 Compose 端口绑定。
 
-### 从已有配置升级
+## 已有配置迁移
 
-旧版 Docker 挂载项目根目录的 `config.yaml`。为支持网页原子保存，现在挂载整个 `config` 目录。已有根目录配置和数据库时跳过 `init`，先停止服务，将原配置复制到新位置，再启动：
+旧版直接挂载根目录的 `config.yaml`。新版需要挂载整个配置目录，以支持网页原子保存。已有配置和数据库时跳过 `init`：
 
 ```bash
 docker compose stop api worker
@@ -36,103 +36,46 @@ cp -p -n config.yaml config/config.yaml
 docker compose up -d --build
 ```
 
-`cp -p -n` 保留文件权限且不覆盖已有目标；如果 `config/config.yaml` 已存在，确认它是需要使用的配置后再启动。Windows 请手动复制原文件。Docker 此后读取和保存 `config/config.yaml`，本地启动仍默认读取根目录 `config.yaml`，两者不会自动同步。原 `./data` 目录无需移动，默认 `app.db_path: ./data/temp-mail.db` 也无需修改。
+`cp -p -n` 保留权限且不覆盖已有目标；目标文件已存在时，先确认它是要使用的配置。Windows 可手动复制。原 `./data` 无需移动，默认 `app.db_path: ./data/temp-mail.db` 无需修改。
 
-不要为已有数据库重新生成加密密钥，否则原邮箱凭据和待处理收件批次无法解密。已经使用 `config/config.yaml` 的部署升级时直接运行 `docker compose up -d --build`。
+Docker 此后使用 `config/config.yaml`，本地启动默认使用根目录 `config.yaml`，两者不会自动同步。不要为已有数据库重新生成加密密钥，否则原邮箱凭据和暂存收件批次无法解密。已经使用新目录布局的部署直接按“更新与重启”操作。
 
-## 服务与持久化
-
-| 服务 | 用途 | 默认启动 |
-| --- | --- | --- |
-| `api` | 提供网页、静态资源和统一 HTTP API，容器内监听 `0.0.0.0:8000` | 是 |
-| `worker` | 执行创建操作、收件同步和到期状态更新 | 是，等待 API 健康后启动 |
-| `init` | 一次性初始化配置，属于 `tools` profile | 否，显式 `run init` 时执行 |
-
-三者使用同一镜像 `temp-mail:local`。API 和 Worker 命令分别为 `python -m app.server --host 0.0.0.0 --port 8000` 与 `python -m app.worker`，工作目录为 `/app`。
-
-镜像使用 `frontend/pnpm-lock.yaml` 锁定依赖，将前端产物放在 `/app/frontend/dist`。浏览器通过同源的 `/v1` 与 `/health` 请求 API；`/docs` 和 `/openapi.json` 保留原功能。前端构建不读取 `config.yaml`，API 令牌、加密密钥及供应商凭据不写入静态文件。
+## 挂载与权限
 
 | 宿主路径 | 容器路径 | 用途 |
 | --- | --- | --- |
-| `./config` | `/app/config` | API 可读写、Worker 只读；包含 `config.yaml` 及保存所需的锁文件和临时文件 |
-| `./data` | `/app/config/data` | API 和 Worker 均可读写；默认相对数据库路径对应的数据库、SQLite WAL 及邮箱锁目录 |
-| `./data` | `/app/data` | 同一数据目录的兼容挂载，保留旧配置的 `/app/data/...` 绝对路径 |
+| `./config` | `/app/config` | API 可读写，Worker 只读；保存配置、锁文件和临时文件 |
+| `./data` | `/app/config/data` | API、Worker 均可读写；默认数据库路径 |
+| `./data` | `/app/data` | 兼容旧配置中的 `/app/data/...` 绝对路径 |
 
-API 和 Worker 均通过 `TEMP_MAIL_CONFIG=/app/config/config.yaml` 选择配置文件。整个目录挂载允许 API 先写临时文件再原子替换配置；不要改回单文件挂载，否则无法保证网页保存。Worker 的配置目录只读，但嵌套的数据挂载保持可写。普通运行服务不会挂载整个项目目录。
+两个服务都使用 `TEMP_MAIL_CONFIG=/app/config/config.yaml`。不要改回单文件挂载：保存时需在同目录写入临时文件，再原子替换原文件。Worker 配置目录只读，其嵌套的数据挂载仍可写。`init` 仅显式执行时运行，普通 `up` 不会初始化配置。
 
-`init` 只将项目目录挂载到 `/workspace`，运行 `python scripts/init_config.py --output /workspace/config/config.yaml --template /app/config.example.yaml`。普通 `up` 不运行初始化服务。
-
-数据库路径按容器文件系统解释，建议保留：
+建议保留默认数据库路径：
 
 ```yaml
 app:
   db_path: ./data/temp-mail.db
 ```
 
-该相对路径以配置文件所在目录 `/app/config` 为基准，因此解析为 `/app/config/data/temp-mail.db`，实际仍保存在宿主机 `./data/temp-mail.db`。也可使用 `/app/data/` 下的绝对路径。宿主机上的 `/Users/...` 或 `/home/...` 路径在容器中并不对应挂载数据，不能直接沿用。容器默认以 root 运行，可以读取初始化时权限为 `0600` 的配置文件。网页原子保存时保留原文件的用户和组，并将配置权限设为 `0600`；无法保留归属或写入文件时会报告保存失败。
+相对路径以配置文件所在目录为基准，上述配置解析为 `/app/config/data/temp-mail.db`，对应宿主机 `./data/temp-mail.db`。也可使用 `/app/data/` 下的绝对路径；宿主机 `/Users/...` 或 `/home/...` 路径不能直接用于容器。
 
-当前按一个 Worker 进程部署，通过两个独立线程池并发创建邮箱和收件。可在网页“系统配置”或 YAML 中调整：
+容器默认以 root 运行，能读取初始化生成的 `0600` 配置。网页保存保留原文件用户和组，并设置权限为 `0600`；无法保留归属或写入时保存失败。若自行指定容器用户，须保证配置目录可写、配置文件可读写、数据目录可读写。
 
-```yaml
-worker:
-  create_concurrency: 2
-  receive_concurrency: 4
-```
+保持一个 Worker 容器，通过独立的创建与收件并发配置调节吞吐，见 [配置说明](configuration.md)。邮箱锁位于数据库旁的 `temp-mail.db.mailbox-locks/`；共享数据库的进程也必须共享该目录，运行时不要删除锁文件。
 
-两项均为 1–32 的整数，省略时分别使用 2 和 4。创建，以及未来支持的发送、删除共用操作池；收件池独立，不会因某个创建请求较慢而停下所有收件。并发数是单进程的上限，继续使用一个 Worker 容器即可；API 健康不代表 Worker 正常消费队列或已成功同步供应商。
+## 更新与重启
 
-同步同一个邮箱时使用独立文件锁，不同邮箱可以同时获取邮件，网络请求和响应解析不持有 SQLite 写事务。邮箱锁目录位于数据库旁，例如 `data/temp-mail.db.mailbox-locks/`，需允许 Worker 写入；现有 `./data` 卷已满足要求。共享数据库的进程也必须共享该锁目录，运行时不要删除锁文件。进程退出后会释放锁，文件本身保留。
+网页“供应商”和“系统配置”的保存会写入宿主机 `config/config.yaml`。大多数配置支持热更新，无需重建镜像；字段含义、生效时机与保存规则见 [配置说明](configuration.md)。
 
-常驻 Worker 在任务完成后继续补位，不受每轮一个创建或 20 个收件的批量限制。`python -m app.worker --once` 则只执行有限一批任务：操作和收件各不超过对应并发数，等待它们完成后退出，不保证排空队列。
-
-## 状态、日志与配置更新
-
-后端统一使用 Loguru，以 `INFO` 级别输出到标准错误，由 Docker 收集。日志包含时间、级别、进程 ID 和代码位置，覆盖 API、Uvicorn 访问与运行日志、Worker、配置初始化脚本以及标准库日志和 Python 警告。应用不创建日志文件，日志保留与轮转由 Docker 日志驱动管理。
-
-API 专用入口 `app.server` 将 `app/logging.py` 中的 `UVICORN_LOG_CONFIG` 字典传给 Uvicorn，日志配置随 Python 代码内置，无需单独的配置文件或挂载。该入口也覆盖热重载父进程、服务子进程和访问日志。异常日志关闭局部变量诊断和扩展回溯，不应额外记录令牌、解密凭据或邮件正文。
-
-```bash
-docker compose ps
-docker compose logs --tail=100 api worker
-docker compose logs -f worker
-```
-
-操作持续 `pending` 时先检查 Worker 日志。收件状态查看邮箱的 `last_synced_at` 和 `last_sync_error_code`；API 的 `/health/ready` 主要检查本地服务及数据库就绪状态。
-
-在网页的“供应商”页面切换卡片右上角开关，会立即将启用状态写入宿主机 `config/config.yaml`；其他供应商参数在“编辑配置”弹窗中修改并保存。“系统配置”页面也可修改并保存系统参数，或者直接编辑这个文件。
-
-供应商启用状态、顺序、连接参数、最长本地有效期、Worker 周期、创建和收件并发数以及 API 令牌支持热更新，无需重启容器。API 在保存成功后立即应用新值，其他 API 进程在收到请求时检查文件变化；Worker 调度器最多每秒检查一次，即使还有网络请求在执行也能应用配置。新任务使用新配置，在途请求继续使用原配置完成。两个服务必须使用同一配置文件，默认目录挂载已保证这一点。
-
-提高并发数后，下一次调度会按新上限补充任务；降低并发数不会中断在途请求，待执行中的任务数量降到新上限以下再继续分配。例如收件从 4 调为 2 时，原有 4 个任务继续完成，之后最多同时同步 2 个邮箱。
-
-数据库路径与加密密钥保持进程启动时的值，变化后才需要同时重启两个服务。配置响应的 `restart_required_fields` 和前端提示会列出这些具体字段：
+数据库路径或加密密钥变化后，须同时重启两个服务：
 
 ```bash
 docker compose restart api worker
 ```
 
-配置变更不需要重新构建镜像。API 令牌更新在保存成功后立即生效，前端返回登录页面并提示使用新令牌；留空保留原令牌和代理，清除代理需明确选择清除。Fernet 密钥不允许通过网页修改，离线轮换也不会自动重新加密已有凭据。数据库路径变更不会迁移数据，须自行安排数据移动，并保证新路径仍位于持久化挂载内。
+更改数据库路径不会迁移数据，新的路径仍须位于持久化挂载内。更换密钥不会重新加密已有凭据，网页也不提供密钥编辑。
 
-目录或文件没有写权限时，网页会报告保存失败，运行配置保持不变。外部修改导致文件无效或不可读时，API 和 Worker 继续使用上一次有效配置并记录脱敏警告，配置查询报告读取失败；修复文件后会再次尝试加载。不要仅为保存配置而重新生成密钥。
-
-临时停止与恢复：
-
-```bash
-docker compose stop api worker
-docker compose up -d
-```
-
-停止并移除容器及 Compose 网络：
-
-```bash
-docker compose down
-```
-
-`down` 不会删除绑定挂载的 `config` 和 `data`，下次 `up` 继续使用原数据。
-
-## 更新镜像
-
-更新项目源码后重新构建并启动，前端改动也通过同一流程发布：
+更新项目源码后重建并启动，前端也随镜像更新：
 
 ```bash
 docker compose build
@@ -141,11 +84,11 @@ docker compose ps
 docker compose logs --tail=100 api worker
 ```
 
-配置和数据库保留在宿主机。涉及数据结构变更时，先按下一节备份，并遵循对应版本的迁移说明；当前项目尚无通用数据库迁移工具。
+涉及数据结构变更时先备份，并遵循对应版本的迁移说明；项目尚无通用数据库迁移工具。临时停止可用 `docker compose stop api worker`，恢复用 `docker compose up -d`。`docker compose down` 移除容器与网络，但不会删除宿主机的 `config`、`data`。
 
 ## 备份与恢复
 
-先停止 API 和 Worker，避免备份期间有写入，然后将配置和整个数据目录一起复制。以下为 Linux/macOS 示例：
+先停止两个服务，确保备份期间没有写入，再复制配置和完整数据目录：
 
 ```bash
 docker compose stop api worker
@@ -156,17 +99,29 @@ cp -a data "$backup_dir/data"
 docker compose up -d
 ```
 
-复制完整 `data` 目录可保留数据库及可能存在的 WAL 文件；配置中的原加密密钥必须与数据库一起保存。备份包含访问令牌、密钥和邮件数据，应保留其访问权限。
+完整 `data` 包含数据库及可能存在的 WAL 文件。配置中的原加密密钥必须与数据库一起保存；备份含访问令牌、密钥与邮件数据，应保留访问权限。配置目录的锁文件和临时文件无需备份。
 
-恢复时停止两个服务，将同一份备份中的 `config.yaml` 恢复到项目的 `config/config.yaml`，替换整个 `data` 目录，再执行 `docker compose up -d`。不要混用不同备份的数据库和密钥。配置目录内的锁文件和临时文件无需备份。
+恢复时停止两个服务，将同一备份的 `config.yaml` 放回 `config/config.yaml`，替换整个 `data` 目录，再运行 `docker compose up -d`。不要混用不同备份的数据库和密钥。
 
-## 宿主机网络
+## 排错
 
-默认端口映射为 `127.0.0.1:8000:8000`，只允许从宿主机本地访问。需要通过其他地址访问时，可调整 Compose 的端口绑定。
+```bash
+docker compose ps
+docker compose logs --tail=100 api worker
+docker compose logs -f worker
+```
 
-若供应商的 `proxy` 指向宿主机服务，容器中的 `127.0.0.1` 表示容器自身。Docker Desktop 环境可将地址配置为 `host.docker.internal`，例如 `http://host.docker.internal:7890`，端口应替换为实际服务端口。
+后端日志由 Loguru 输出到标准错误，Docker 负责收集和轮转，应用不创建日志文件。
 
-Linux 环境需要访问宿主机服务时，可自行添加 `compose.override.yaml`：
+| 现象 | 检查项 |
+| --- | --- |
+| 创建操作一直等待处理 | Worker 是否运行及其日志；API 健康不代表 Worker 正常消费队列 |
+| 邮件未更新 | 邮箱的 `last_synced_at`、`last_sync_error_code` 与 Worker 日志；`/health/ready` 只检查本地就绪状态 |
+| 网页保存配置失败 | API 是否挂载整个可写配置目录，目录与文件权限是否允许保存 |
+| 手动修改后配置未生效 | 文件是否有效、两个服务是否读取同一路径；无效配置会保留上次有效运行值，修复后重新加载 |
+| 容器无法连接宿主机代理 | 容器内 `127.0.0.1` 指向容器自身，参见下方网络配置 |
+
+Docker Desktop 可将宿主机代理地址写为 `http://host.docker.internal:7890`，端口按实际服务调整。Linux 可在 `compose.override.yaml` 中添加：
 
 ```yaml
 services:
@@ -178,4 +133,4 @@ services:
       - "host.docker.internal:host-gateway"
 ```
 
-该映射是可选配置，默认部署不会添加。宿主服务还需监听容器能够访问的地址；仅监听宿主机 `127.0.0.1` 的服务未必可通过该映射访问。
+此映射为可选配置；宿主服务还需监听容器可访问的地址，仅监听宿主机 `127.0.0.1` 未必可达。

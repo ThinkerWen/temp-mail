@@ -43,7 +43,7 @@ def test_frontend_is_public_and_api_authentication_is_preserved(frontend_client)
     assert frontend_client.get("/docs").status_code == 200
 
 
-@pytest.mark.parametrize("path", ["/inbox", "/providers", "/operations", "/settings"])
+@pytest.mark.parametrize("path", ["/index", "/inbox", "/providers", "/operations", "/settings"])
 def test_frontend_pages_support_direct_visits_and_refresh(frontend_client, path):
     response = frontend_client.get(path)
     assert response.status_code == 200
@@ -53,7 +53,7 @@ def test_frontend_pages_support_direct_visits_and_refresh(frontend_client, path)
     assert path not in frontend_client.get("/openapi.json").json()["paths"]
 
 
-@pytest.mark.parametrize("path", ["/inbox", "/providers", "/operations", "/settings"])
+@pytest.mark.parametrize("path", ["/index", "/inbox", "/providers", "/operations", "/settings"])
 def test_frontend_pages_redirect_trailing_slash_and_preserve_query(frontend_client, path):
     response = frontend_client.get(f"{path}/?view=test", follow_redirects=False)
     assert response.status_code == 307
@@ -75,6 +75,7 @@ def test_frontend_assets_are_served_independently_of_working_directory(frontend_
         "/v1/unknown",
         "/health/unknown",
         "/unknown",
+        "/index/unknown",
         "/inbox/unknown",
         "/providers/unknown",
         "/operations/unknown",
@@ -104,7 +105,19 @@ def test_api_starts_without_built_frontend(frontend_client, tmp_path, monkeypatc
     monkeypatch.setattr(api, "FRONTEND_DIST", tmp_path / "not-built")
     service = frontend_client.app.state.service
     with TestClient(api.create_app(service.settings, service.registry)) as client:
-        for path in ("/", "/inbox", "/providers", "/operations", "/settings", "/inbox/", "/providers/", "/operations/", "/settings/"):
+        for path in (
+            "/",
+            "/index",
+            "/inbox",
+            "/providers",
+            "/operations",
+            "/settings",
+            "/index/",
+            "/inbox/",
+            "/providers/",
+            "/operations/",
+            "/settings/",
+        ):
             assert client.get(path).status_code == 404
         assert client.get("/assets/index-example.js").status_code == 404
         assert client.get("/health/ready").status_code == 200

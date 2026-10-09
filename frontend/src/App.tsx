@@ -8,6 +8,7 @@ import {
   History,
   Inbox as InboxIcon,
   Layers,
+  LayoutDashboard,
   LogOut,
   Mail,
   Menu,
@@ -41,6 +42,7 @@ import type { Configuration, CreatePayload, Draft, Operation } from './types';
 
 const ConfigEditor = lazy(() => import('./components/ConfigEditor'));
 const Providers = lazy(() => import('./components/Providers'));
+const Dashboard = lazy(() => import('./components/Dashboard'));
 const Operations = lazy(() =>
   import('./components/Overview').then((module) => ({ default: module.Operations })),
 );
@@ -98,6 +100,14 @@ export default function App() {
 function Workspace({ token, disconnect }: { token: string; disconnect: (message?: string) => void }) {
   const t = useI18n();
   const headings = {
+    index: [
+      t('首页', 'Home'),
+      t('每一份动态，一目了然。', 'Your workspace at a glance.'),
+      t(
+        '查看邮箱概况、收件趋势和最近活动。',
+        'Review your mailboxes, incoming mail trends, and recent activity.',
+      ),
+    ],
     inbox: [
       t('邮箱工作台', 'Inbox'),
       t('你的收件箱，轻装上阵。', 'Your inbox, without the clutter.'),
@@ -186,7 +196,7 @@ function Workspace({ token, disconnect }: { token: string; disconnect: (message?
     autoRefresh ? 30_000 : 0,
   );
   const mailboxes = useResource(
-    `mailboxes:${mailboxOffset}:${searchEmail}`,
+    section === 'index' ? null : `mailboxes:${mailboxOffset}:${searchEmail}`,
     (signal) => api.mailboxes(token, mailboxOffset, searchEmail, signal),
     autoRefresh ? 5000 : 0,
   );
@@ -388,6 +398,15 @@ function Workspace({ token, disconnect }: { token: string; disconnect: (message?
         <span className="nav-caption">{t('工作台', 'Workspace')}</span>
         <nav aria-label={t('主导航', 'Main navigation')}>
           <a
+            href={sectionPaths.index}
+            aria-current={section === 'index' ? 'page' : undefined}
+            className={`button button--tertiary nav-link ${section === 'index' ? 'active' : ''}`}
+            onClick={(event) => chooseSection(event, 'index')}
+          >
+            <LayoutDashboard size={19} />
+            <span>{t('首页', 'Home')}</span>
+          </a>
+          <a
             href={sectionPaths.inbox}
             aria-current={section === 'inbox' ? 'page' : undefined}
             className={`button button--tertiary nav-link ${section === 'inbox' ? 'active' : ''}`}
@@ -430,14 +449,8 @@ function Workspace({ token, disconnect }: { token: string; disconnect: (message?
           <div className="sidebar-tip">
             <div>
               <ShieldCheck size={18} />
-              <strong>{t('短暂的地址，专注的收件', 'Temporary addresses, focused inbox')}</strong>
+              <strong>{t('短暂的地址，隐私的收件', 'Temporary addresses, private inbox')}</strong>
             </div>
-            <p>
-              {t(
-                '邮箱到期后停止收发，历史邮件保留至手动清除。',
-                'Mailboxes stop sending and receiving when they expire. Message history is kept until you clear it.',
-              )}
-            </p>
           </div>
           <a className="sidebar-docs" href="/docs" target="_blank" rel="noreferrer">
             <Code2 size={17} />
@@ -511,6 +524,16 @@ function Workspace({ token, disconnect }: { token: string; disconnect: (message?
             )}
           </div>
           <ErrorNotice error={providers.error} retry={providers.refresh} />
+          {section === 'index' && (
+            <Suspense fallback={<Loading />}>
+              <Dashboard
+                token={token}
+                disconnect={disconnect}
+                openMailbox={openMailbox}
+                navigate={navigate}
+              />
+            </Suspense>
+          )}
           {section === 'inbox' && (
             <>
               <div className="stats-row">

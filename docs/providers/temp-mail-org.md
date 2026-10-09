@@ -1,10 +1,14 @@
-# temp-mail.org 接入说明
+# temp-mail.org
 
-供应商 ID 为 `temp-mail-org`，支持创建邮箱和收件，不支持发件、远端删除、附件或 Webhook。接入使用网站内部接口，接口兼容性需要持续维护。
+## 能力
 
-## 配置
+供应商 ID：`temp-mail-org`。支持创建邮箱和收件，不支持发件、远端删除、附件或 Webhook。
 
-在 `config.yaml` 的 `providers` 中配置：
+当前适配器使用网站内部 Web 接口，并非有稳定兼容性承诺的官方开放 API。网站的“删除邮箱”行为尚未确认会删除远端数据，因此本接入不声明删除能力。
+
+## 配置差异
+
+以下列出本供应商的默认地址和有效期，公共字段、代理配置与保存规则见 [配置说明](../configuration.md)。
 
 ```yaml
 providers:
@@ -12,52 +16,37 @@ providers:
     enabled: true
     index_url: https://temp-mail.org/zh/
     base_url: https://web2.temp-mail.org
-    timeout_seconds: 15
-    impersonate: chrome110
     max_ttl_seconds: 86400
-    proxy: null
 ```
 
-`index_url` 仅说明网站入口，`base_url` 是实际 API 地址。客户端使用 curl_cffi，默认 `impersonate: chrome110`。供应商配置保存后 API 立即热更新，Worker 在安全的任务边界应用，无需重启；在途请求使用旧配置完成。
-
-`proxy` 是正式请求代理配置，支持 HTTP、HTTPS、SOCKS4、SOCKS4a、SOCKS5、SOCKS5h 和 URL 内认证。省略、`null` 或空白值保留 curl_cffi 的环境代理行为，不保证直连。显式代理失败返回 `PROVIDER_UNAVAILABLE`，不会自动切换直连。
+客户端默认使用 `impersonate: chrome110`。上游未提供已验证的邮箱有效期，本地配置不保证上游邮箱或邮件的存活时长。
 
 ## 上游协议
 
 | 操作 | 请求 | 返回 |
 | --- | --- | --- |
 | 创建邮箱 | `POST /mailbox`，无请求体、无旧邮箱令牌 | `token`、`mailbox` |
-| 收件列表 | `GET /messages`，使用邮箱 Bearer 令牌 | `mailbox`、`messages` 摘要数组 |
-| 邮件详情 | `GET /messages/{id}`，使用同一令牌 | `_id`、`receivedAt`、`from`、`subject`、正文 |
+| 收件列表 | `GET /messages`，携带邮箱 Bearer 令牌 | `mailbox`、`messages` 摘要数组 |
+| 邮件详情 | `GET /messages/{id}`，携带同一令牌 | `_id`、`receivedAt`、`from`、`subject`、正文 |
 
-列表中的 `_id` 用于获取详情。`receivedAt` 按 UNIX 秒转换为 UTC 时间，也兼容带时区的 ISO 字符串。正文优先使用非空白的 `bodyText`，否则把 `bodyHtml` 转换为纯文本。适配器校验邮箱地址和详情 ID，跳过已消失的邮件；每轮同步仍会获取列表中的详情，尚无增量游标。
+列表中的 `_id` 用于获取详情，每轮同步仍读取列表内的邮件详情，尚无增量游标。`receivedAt` 按 UNIX 秒转换为 UTC，也兼容带时区的 ISO 字符串。正文优先使用非空白 `bodyText`，否则将 `bodyHtml` 转为纯文本；适配器校验邮箱地址与详情 ID，跳过已消失的邮件。
 
-网站的“删除邮箱”行为未确认会删除远端数据，因此适配器不声明删除能力，也不通过创建新邮箱替代删除。
+每个邮箱返回独立令牌，无需共享 API Key 或 Cookie。令牌由业务层加密保存，`upstream_id` 是其 SHA-256 摘要，摘要不能用于访问邮箱。创建与缓存查询示例见 [test_main.http](../../test_main.http)。
 
-## 凭据与有效期
+## 语义与错误
 
-每个邮箱独立返回令牌，无需共享上游 API Key 或 Cookie。业务层使用 Fernet 加密保存令牌，`upstream_id` 使用令牌的 SHA-256 摘要标识生命周期。令牌失效时保留原绑定，不创建新邮箱或切换供应商；摘要不能作为访问凭证。
-
-`max_ttl_seconds` 配置最长本地有效期，接受 60–31536000 的整数秒，默认 86400。创建请求的 `ttl_seconds` 必须至少为 60 秒，且不超过该上限。可以在供应商卡片的“编辑配置”弹窗中修改并保存，API 随即按新上限校验创建请求，Worker 在任务边界加载新配置。已有邮箱的到期时间不追溯修改。
-
-该期限仅限制本地收发。上游未提供已验证的有效期，不能据此保证邮箱或邮件存活时长；若返回上游到期时间，则与请求期限取较早值。本地到期会停止收发并清理上游访问凭据，已缓存邮件继续只读保留；用户确认清除失效邮箱时才删除本地邮箱及邮件数据。这不代表远端数据已删除。
-
-创建请求指定 `provider: "temp-mail-org"`、`required_capabilities: ["receive"]` 和 `ttl_seconds`。查询创建操作成功后，通过统一邮件 API 读取 Worker 同步的缓存。完整请求示例见 [test_main.http](../../test_main.http)。
-
-## 错误与重试
+令牌失效后保留原供应商绑定，不创建替代邮箱。创建没有已确认的上游幂等机制：结果无法确认时记为 `unknown`，不自动重放；客户端重试应复用原 `Idempotency-Key`。
 
 | 上游情况 | 错误码 |
 | --- | --- |
-| `401` | `INVALID_CREDENTIAL` |
-| `403` | `PROVIDER_ACCESS_DENIED` |
-| `429` | `PROVIDER_RATE_LIMITED` |
+| `401` / `403` / `429` | `INVALID_CREDENTIAL` / `PROVIDER_ACCESS_DENIED` / `PROVIDER_RATE_LIMITED` |
 | `404`、`410` | `MAILBOX_NOT_FOUND` 或 `MESSAGE_NOT_FOUND` |
 | `408`、`5xx`、网络错误或超时 | `PROVIDER_UNAVAILABLE` |
 | 意外状态或无效响应 | `PROVIDER_INVALID_RESPONSE` |
 | 其他 `4xx` | `PROVIDER_REQUEST_REJECTED` |
 
-创建没有已确认的上游幂等机制。结果无法确认时记录 `unknown`，不自动重放；客户端重试应复用原 `Idempotency-Key`。收件失败由 Worker 退避后继续使用原绑定同步，错误记录在 `last_sync_error_code`。发件和删除请求返回 `CAPABILITY_UNSUPPORTED`。
+收件失败记入 `last_sync_error_code`，Worker 退避后继续同步原邮箱。发件和远端删除返回 `CAPABILITY_UNSUPPORTED`；本地清除不代表远端数据已删除。
 
 ## 验证范围
 
-已验证创建、空收件同步、进程重启后恢复原绑定和幂等请求复用；也已通过适配器读取外部真实来信及正文。真实来信经 Worker 入库、再由统一 API 读取的完整链路尚未实测。
+已验证创建、空收件同步、进程重启后恢复原绑定与幂等请求复用；适配器也已读取外部真实来信及正文。真实来信经 Worker 入库、再由统一 API 读取的完整链路尚未实测。

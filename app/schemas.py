@@ -41,6 +41,51 @@ class OperationPage(BaseModel):
     total: int
 
 
+class DashboardMailboxes(BaseModel):
+    total: int
+    active: int
+    expired: int
+    deleted: int
+    sync_errors: int
+
+
+class DashboardMessages(BaseModel):
+    total: int
+    received_24h: int
+
+
+class DashboardOperations(BaseModel):
+    total: int
+    pending: int
+    running: int
+    succeeded: int
+    failed: int
+    unknown: int
+
+
+class DashboardActivity(BaseModel):
+    date: str
+    mailboxes: int
+    messages: int
+
+
+class DashboardProvider(BaseModel):
+    id: str
+    mailboxes: int
+    active: int
+
+
+class DashboardView(BaseModel):
+    generated_at: str
+    mailboxes: DashboardMailboxes
+    messages: DashboardMessages
+    operations: DashboardOperations
+    last_synced_at: str | None
+    activity: list[DashboardActivity]
+    recent_operations: list[OperationView]
+    provider_stats: list[DashboardProvider]
+
+
 class MailboxView(BaseModel):
     id: str
     email: str

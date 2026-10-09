@@ -83,6 +83,27 @@ const message: Message = {
   text: '<img src=x onerror="window.__mailExecuted=true">\n<script>window.__mailExecuted=true</script>\n这是可安全阅读的正文。',
 };
 
+function dashboard() {
+  const now = new Date();
+  return {
+    generated_at: now.toISOString(),
+    mailboxes: { total: 128, active: 96, expired: 24, deleted: 8, sync_errors: 3 },
+    messages: { total: 2048, received_24h: 37 },
+    operations: { total: 250, pending: 2, running: 1, succeeded: 240, failed: 6, unknown: 1 },
+    last_synced_at: now.toISOString(),
+    activity: Array.from({ length: 7 }, (_, index) => ({
+      date: new Date(now.getTime() - (6 - index) * 86400_000).toISOString().slice(0, 10),
+      mailboxes: index * 2,
+      messages: index * 7,
+    })),
+    recent_operations: [] as Operation[],
+    provider_stats: [
+      { id: 'temp-mail-org', mailboxes: 100, active: 80 },
+      { id: 'tempmail-lol', mailboxes: 28, active: 16 },
+    ],
+  };
+}
+
 interface MockState {
   activeToken: string;
   configResponseGate?: Promise<void>;
@@ -104,6 +125,10 @@ interface MockState {
   cleanupPreviewFailure?: string;
   cleanupFailure?: string;
   cleanupResponseGate?: Promise<void>;
+  dashboard: ReturnType<typeof dashboard>;
+  dashboardRequests: Request[];
+  dashboardFailure?: string;
+  dashboardResponseGate?: Promise<void>;
 }
 
 async function mockApi(page: Page): Promise<MockState> {
@@ -120,6 +145,8 @@ async function mockApi(page: Page): Promise<MockState> {
     cleanupPreviews: [],
     cleanupPreviewQueries: [],
     cleanupPosts: [],
+    dashboard: dashboard(),
+    dashboardRequests: [],
   };
   await page.route('**/v1/**', async (route) => {
     const request = route.request();
@@ -167,6 +194,14 @@ async function mockApi(page: Page): Promise<MockState> {
         if (state.configResponseGate) await state.configResponseGate;
       }
       await route.fulfill({ json: state.config });
+    } else if (url.pathname === '/v1/dashboard' && request.method() === 'GET') {
+      state.dashboardRequests.push(request);
+      if (state.dashboardResponseGate) await state.dashboardResponseGate;
+      await route.fulfill(
+        state.dashboardFailure
+          ? { status: 503, json: { error: { code: state.dashboardFailure } } }
+          : { json: { ...state.dashboard, recent_operations: state.operations } },
+      );
     } else if (url.pathname === '/v1/capabilities') {
       await route.fulfill({
         json: {
@@ -321,12 +356,177 @@ async function mockApi(page: Page): Promise<MockState> {
   return state;
 }
 
-async function connect(page: Page, path = '/') {
+async function connect(page: Page, path = '/inbox') {
   await page.goto(path);
   await page.getByLabel('访问令牌', { exact: true }).fill(token);
   await page.getByRole('button', { name: '连接工作台', exact: true }).click();
   await expect(page.getByRole('button', { name: '退出登录', exact: true })).toBeVisible();
 }
+
+test('dashboard is the default after root login and supports reload and browser history', async ({
+  page,
+}, testInfo) => {
+  const state = await mockApi(page);
+  await connect(page, '/');
+  await expect(page).toHaveURL(/\/index$/);
+  const navigation = page.getByRole('navigation', { name: '主导航' });
+  const home = navigation.getByRole('link', { name: '首页', exact: true });
+  await expect(home).toHaveAttribute('href', '/index');
+  await expect(home).toHaveAttribute('aria-current', 'page');
+  await expect(page.locator('.dashboard')).toContainText('128');
+  await expect(page.getByRole('button', { name: '新建邮箱', exact: true })).toHaveCount(0);
+  expect(state.dashboardRequests.length).toBeGreaterThan(0);
+  expect(state.queries).toHaveLength(0);
+  await expect(page.getByTestId('dashboard-stat-active').locator('strong')).toHaveText('96');
+  await expect(page.getByTestId('dashboard-stat-messages').locator('strong')).toHaveText('2,048');
+  await expect(page.getByRole('list', { name: '每日新增数量（UTC）' }).getByRole('listitem')).toHaveCount(7);
+  await page.screenshot({
+    path: testInfo.outputPath('dashboard-desktop-light.png'),
+    fullPage: true,
+    animations: 'disabled',
+  });
+  await page.reload();
+  await expect(page).toHaveURL(/\/index$/);
+  await expect(page.locator('.dashboard')).toContainText('128');
+  await navigation.getByRole('link', { name: '邮箱工作台', exact: true }).click();
+  await expect(page).toHaveURL(/\/inbox$/);
+  await expect(page.getByRole('button', { name: '新建邮箱', exact: true })).toBeVisible();
+  await page.goBack();
+  await expect(page).toHaveURL(/\/index$/);
+  await expect(home).toHaveAttribute('aria-current', 'page');
+  await page.goForward();
+  await expect(page).toHaveURL(/\/inbox$/);
+});
+
+for (const locale of ['zh', 'en'] as const) {
+  test(`dashboard supports ${locale} dark mode and mobile layout without overflow`, async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await mockApi(page);
+    await connect(page, '/index');
+    await page.getByRole('button', { name: '切换到深色模式', exact: true }).click();
+    if (locale === 'en') {
+      await page.getByRole('button', { name: /界面语言/ }).click();
+      await page.getByRole('option', { name: 'English', exact: true }).click();
+    }
+    await expect(page.locator('html')).toHaveClass(/dark/);
+    await expect(page.locator('.dashboard')).toContainText('128');
+    await expect(
+      page.getByRole('button', { name: locale === 'zh' ? '刷新看板' : 'Refresh dashboard', exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole('button', { name: locale === 'zh' ? '新建邮箱' : 'New mailbox', exact: true }),
+    ).toHaveCount(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.reload();
+    await expect(page).toHaveURL(/\/index$/);
+    await expect(page.locator('html')).toHaveClass(/dark/);
+    await expect(page.locator('.dashboard')).toContainText('128');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.screenshot({
+      path: testInfo.outputPath(`dashboard-mobile-${locale}-dark.png`),
+      fullPage: true,
+      animations: 'disabled',
+    });
+  });
+}
+
+test('dashboard shows initial loading, retries errors, and animates manual refresh until completion', async ({
+  page,
+}) => {
+  const state = await mockApi(page);
+  let release!: () => void;
+  state.dashboardResponseGate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  state.dashboardFailure = 'STORAGE_UNAVAILABLE';
+  await connect(page, '/index');
+  const dashboardPage = page.locator('.dashboard');
+  await expect(dashboardPage.getByRole('status')).toBeVisible();
+  await expect(dashboardPage).not.toContainText('128');
+  release();
+  await expect(dashboardPage.getByRole('alert')).toBeVisible();
+  state.dashboardFailure = undefined;
+  state.dashboardResponseGate = undefined;
+  await dashboardPage.getByRole('button', { name: '重试', exact: true }).click();
+  await expect(dashboardPage.getByRole('alert')).toHaveCount(0);
+  await expect(dashboardPage).toContainText('128');
+
+  state.dashboardResponseGate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  state.dashboard.mailboxes.total = 129;
+  const refresh = page.getByRole('button', { name: '刷新看板', exact: true });
+  await refresh.click();
+  await expect(refresh).toHaveAttribute('data-state', 'refreshing');
+  await expect(refresh).toBeDisabled();
+  await expect(refresh.locator('svg.spin')).toBeVisible();
+  expect(
+    await refresh.locator('svg.spin').evaluate((element) => getComputedStyle(element).animationName),
+  ).not.toBe('none');
+  await expect(dashboardPage).toContainText('128');
+  release();
+  await expect(dashboardPage).toContainText('129');
+  await expect(refresh).toHaveAttribute('data-state', 'done');
+  await expect(refresh).toBeEnabled();
+  await expect(refresh.locator('svg.spin')).toHaveCount(0);
+});
+
+test('dashboard polls every ten seconds and cancels its polling when leaving the page', async ({ page }) => {
+  await page.clock.install();
+  const state = await mockApi(page);
+  let release!: () => void;
+  state.dashboardResponseGate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await connect(page, '/index');
+  await expect.poll(() => state.dashboardRequests.length).toBeGreaterThan(0);
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
+  release();
+  await expect(page.locator('.dashboard')).toContainText('128');
+  const before = state.dashboardRequests.length;
+  await page.clock.fastForward(9999);
+  expect(state.dashboardRequests).toHaveLength(before);
+  await page.clock.fastForward(1);
+  await expect.poll(() => state.dashboardRequests.length).toBe(before + 1);
+  await page.getByRole('link', { name: '邮箱工作台', exact: true }).click();
+  await expect(page).toHaveURL(/\/inbox$/);
+  const afterLeaving = state.dashboardRequests.length;
+  await page.clock.fastForward(30_000);
+  expect(state.dashboardRequests).toHaveLength(afterLeaving);
+  await page.getByRole('link', { name: '首页', exact: true }).click();
+  await expect.poll(() => state.dashboardRequests.length).toBeGreaterThan(afterLeaving);
+});
+
+test('dashboard recent operations only open mailboxes whose live reference still exists', async ({
+  page,
+}) => {
+  const state = await mockApi(page);
+  state.operations = [
+    operation({
+      id: 'op-current',
+      status: 'succeeded',
+      mailbox_id: 'mailbox-1',
+      result: { mailbox_id: 'mailbox-1', email: 'inbox@example.test' },
+    }),
+    operation({
+      id: 'op-cleaned',
+      status: 'succeeded',
+      mailbox_id: null,
+      result: { mailbox_id: 'mailbox-cleaned', email: 'cleaned@example.test' },
+    }),
+  ];
+  await connect(page, '/index');
+  const current = page.locator('.dashboard .dashboard-operation').filter({ hasText: 'op-current' });
+  const cleaned = page.locator('.dashboard .dashboard-operation').filter({ hasText: 'op-cleaned' });
+  await expect(cleaned).toBeVisible();
+  await expect(cleaned.getByRole('button', { name: '查看邮箱', exact: true })).toHaveCount(0);
+  await expect(cleaned.getByRole('link')).toHaveCount(0);
+  await current.getByRole('button', { name: '查看邮箱', exact: true }).click();
+  await expect(page).toHaveURL(/\/inbox$/);
+  await expect(page.getByText(message.subject, { exact: true })).toBeVisible();
+});
 
 function expiredMailboxes(count: number): Mailbox[] {
   return Array.from({ length: count }, (_, index) =>
@@ -1288,6 +1488,8 @@ test('creates a mailbox through an asynchronous operation and refreshes the list
 });
 
 for (const [path, label] of [
+  ['/index', '首页'],
+  ['/inbox', '邮箱工作台'],
   ['/providers', '供应商'],
   ['/settings', '系统配置'],
   ['/operations', '操作记录'],
@@ -1308,7 +1510,9 @@ for (const [path, label] of [
       'page',
     );
     await expect(page.getByLabel('访问令牌', { exact: true })).toHaveCount(0);
-    await expect(page.getByRole('button', { name: '新建邮箱', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: '新建邮箱', exact: true })).toHaveCount(
+      path === '/inbox' ? 1 : 0,
+    );
   });
 }
 
