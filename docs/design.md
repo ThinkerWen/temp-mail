@@ -13,6 +13,7 @@
 | 项目 | 当前实现 |
 | --- | --- |
 | HTTP 服务 | FastAPI，版本前缀 `/v1` |
+| 网页前端 | HeroUI 3、React 19、TypeScript、Vite 8、Tailwind CSS 4，pnpm 管理依赖 |
 | 持久化 | SQLite，共享数据库文件 |
 | 后台任务 | 独立 Worker，持久化操作队列与周期收件同步 |
 | 鉴权 | HTTP Bearer，单服务主体 `default` |
@@ -31,7 +32,8 @@
 
 ```mermaid
 flowchart TD
-    Client[调用方 / HTTP 客户端] --> API[FastAPI：鉴权、参数校验、幂等]
+    Browser[浏览器：HeroUI 前端] --> API[FastAPI：鉴权、参数校验、幂等]
+    Client[调用方 / HTTP 客户端] --> API
     API --> Service[邮箱与操作服务]
     Service --> DB[(SQLite：邮箱、邮件、操作)]
     Service --> Registry[供应商注册表：能力与创建路由]
@@ -46,12 +48,18 @@ flowchart TD
 
 API 负责鉴权、校验、访问隔离、查询和操作入队；不在请求中等待远端创建或发件。Worker 消费队列、调用适配器、保存结果并同步收件。API 和 Worker 共用数据库、加密密钥及配置。
 
+前端使用相同的 `/v1` 契约，负责登录、供应商与有效期选择、创建状态轮询、分页列表和纯文本邮件阅读。每 5 秒刷新的是本地收件缓存，不会直接调用供应商或改变 Worker 的上游同步周期。创建结果为 `unknown` 时不自动重新提交。前端不包含供应商凭据，也不承担后台同步职责；具体开发与交互约定见 [前端说明](frontend.md)。
+
 供应商注册表负责新邮箱的能力筛选和路由。已有邮箱通过持久化的 `provider_id` 获取适配器，使用上游邮箱 ID 和解密凭据调用远端；不根据 email 域名推断供应商。
 
 目录结构：
 
 ```text
 main.py                 FastAPI 入口
+frontend/               HeroUI + React 前端，使用 pnpm
+  src/                  页面、API 客户端与样式
+  dist/                 pnpm build 产物，由 API 提供，不提交版本库
+  pnpm-lock.yaml        前端依赖锁文件
 app/
   api.py                HTTP 路由、鉴权和错误转换
   schemas.py            请求与响应模型
@@ -288,7 +296,11 @@ stateDiagram-v2
 
 服务从当前工作目录读取 `config.yaml`，不读取 `.env` 或 `TEMP_MAIL_*`。`app` 配置数据库、API 令牌及加密密钥，`worker` 配置同步和操作超时，`providers` 按供应商 ID 配置启用状态及连接参数。`app` 和 `providers` 必填，`worker` 可省略。相对数据库路径基于配置文件目录解析，API 令牌至少 24 字符。使用已有数据库时须保留原路径和加密密钥，否则无法访问原数据或解密绑定凭据。
 
-初始部署使用一个 API 进程、一个 Worker 进程及本地 SQLite 文件。API 和 Worker 的工作目录、数据库路径及密钥必须一致。API 就绪不代表 Worker 正在执行任务，部署时应分别管理进程。
+初始部署使用一个 API 进程、一个 Worker 进程及本地 SQLite 文件。API 和 Worker 的工作目录、数据库路径及密钥必须一致。本地可通过 `uv run python run.py` 统一管理两个进程，按 Ctrl+C 同时停止；一个进程意外退出时，入口停止另一个并以非零状态退出。`--reload` 只重载 API，Worker 始终保持单个进程。API 就绪不代表 Worker 正在执行任务。
+
+Docker Compose 使用同一镜像分别运行 API 和 Worker，并共享只读配置与持久化数据目录。镜像多阶段构建先通过 pnpm 生成前端静态文件，再放入 Python 运行镜像，由 API 在 `/` 提供页面，保留 `/v1`、`/health`、`/docs` 与 `/openapi.json`。浏览器与 API 同源，无需独立前端容器。首次配置、启动、升级和停机备份步骤见 [Docker 部署文档](deployment.md)。
+
+网页使用 `app.api_token` 登录，只将令牌保存在当前标签页的 `sessionStorage`，退出时清除。该登录方式沿用单服务主体模型，没有新增用户账户或租户隔离。加密密钥、数据库路径与供应商连接配置仍只由后端读取，前端构建无需这些配置。
 
 `providers.<id>.index_url` 是可选的网站入口说明，例如 `temp-mail-org` 的 `https://temp-mail.org/zh/`；它不参与路由、网络调用或适配器参数。`base_url` 仍用于实际 API 请求。
 

@@ -168,3 +168,13 @@ data/
 *.db
 *.db-shm
 *.db-wal
+
+# Frontend dependencies and local configuration
+node_modules/
+.pnpm-store/
+*.tsbuildinfo
+frontend/.env*
+
+# Browser test artifacts
+frontend/test-results/
+frontend/playwright-report/

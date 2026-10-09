@@ -1,0 +1,32 @@
+# Only runtime sources and build inputs enter the build context.
+**
+!Dockerfile
+!pyproject.toml
+!uv.lock
+!main.py
+!config.example.yaml
+!app/
+!app/**
+!scripts/
+!scripts/init_config.py
+!frontend/
+!frontend/package.json
+!frontend/pnpm-lock.yaml
+!frontend/index.html
+!frontend/tsconfig*.json
+!frontend/vite.config.*
+!frontend/src/
+!frontend/src/**
+!frontend/public/
+!frontend/public/**
+
+# Local tools and generated files are never part of the image.
+app/utils.py
+frontend/node_modules/
+frontend/dist/
+frontend/.env*
+**/__pycache__/
+**/*.py[cod]
+**/*.db
+**/*.db-shm
+**/*.db-wal

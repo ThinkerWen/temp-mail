@@ -1,8 +1,8 @@
 # Temp Mail
 
-通过统一 API 创建临时邮箱、查询邮箱和读取邮件。邮箱创建后固定绑定供应商，后续操作自动路由到原供应商。
+通过网页或统一 API 创建临时邮箱、查询邮箱和读取邮件。邮箱创建后固定绑定供应商，后续操作自动路由到原供应商。
 
-项目采用 FastAPI + SQLite + 独立 Worker，提供持久化操作队列、幂等创建、凭据加密和定期收件同步。
+项目采用 FastAPI + SQLite + 独立 Worker，提供持久化操作队列、幂等创建、凭据加密和定期收件同步。前端使用 HeroUI、React 和 TypeScript，依赖通过 pnpm 管理。
 
 ## 支持的供应商
 
@@ -13,9 +13,26 @@
 
 两家均不支持本项目的发件、远端删除和附件下载。框架保留通用发件、删除接口，当前调用会返回能力错误。供应商故障不会触发已有邮箱迁移。
 
-## 快速启动
+## Docker 部署
 
-需要 Python 3.12+ 和 uv，在项目根目录安装依赖：
+使用 Docker 和 Compose v2，在项目根目录执行：
+
+```bash
+docker compose build
+docker compose run --rm --user "$(id -u):$(id -g)" init
+mkdir -p data
+docker compose up -d
+```
+
+`init` 仅用于首次创建配置；已有 `config.yaml` 时跳过，保留原加密密钥。Windows 可省略 `--user` 参数。默认同时启动 API 和 Worker，访问 `http://127.0.0.1:8000/`，使用配置中的 `app.api_token` 登录。交互 API 文档仍位于 `/docs`。
+
+镜像构建时自动安装并构建前端，由 API 提供静态页面，无需在宿主机安装 Node.js 或单独部署前端容器。
+
+容器数据库路径使用 `./data/temp-mail.db`，不要填写宿主机绝对路径。挂载、日志、升级和备份步骤见 [Docker 部署文档](docs/deployment.md)。
+
+## 本地启动
+
+后端需要 Python 3.12+ 和 uv；开发前端还需要 Node.js 22.13+（可使用 24 LTS）和 pnpm 11.0.9。在项目根目录安装后端依赖：
 
 ```bash
 uv sync --dev
@@ -24,39 +41,34 @@ uv sync --dev
 首次运行时执行下面的命令，从模板创建 `config.yaml` 并生成访问令牌和加密密钥。已有配置时命令会退出，避免覆盖密钥；使用已有数据库时，应恢复对应的原配置。
 
 ```bash
-uv run python - <<'PY'
-import os
-import secrets
-from pathlib import Path
-
-import yaml
-from cryptography.fernet import Fernet
-
-config = yaml.safe_load(Path("config.example.yaml").read_text(encoding="utf-8"))
-config["app"]["api_token"] = secrets.token_urlsafe(32)
-config["app"]["encryption_key"] = Fernet.generate_key().decode()
-fd = os.open("config.yaml", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-with os.fdopen(fd, "w", encoding="utf-8") as file:
-    yaml.safe_dump(config, file, sort_keys=False, allow_unicode=True)
-print("已创建 config.yaml")
-PY
+uv run python scripts/init_config.py
 ```
 
-分别在两个终端中启动 API 和 Worker，两个终端都使用项目根目录：
+在项目根目录通过统一入口启动 API 和一个 Worker：
 
 ```bash
-uv run uvicorn main:app --reload
+uv run python run.py
 ```
+
+默认监听 `127.0.0.1:8000`，可通过 `--host` 和 `--port` 调整。开发时使用 `uv run python run.py --reload`，只对 API 启用热重载；修改 Worker 代码后需重启入口。按 Ctrl+C 会停止两个进程；任何一个进程意外退出，入口都会停止另一个并以非零状态退出。切换到统一入口前，先停止原先手动启动的 API 和 Worker，避免端口冲突或重复运行 Worker。
+
+开发前端时，在第二个终端启动 Vite：
 
 ```bash
-uv run python -m app.worker
+cd frontend
+pnpm install --frozen-lockfile
+pnpm dev
 ```
 
-访问 `http://127.0.0.1:8000/docs` 打开交互文档。API 不会自动启动 Worker；只启动 API 时，创建操作不会执行，收件也不会同步。
+访问 `http://127.0.0.1:5173/`，填入 `config.yaml` 中的 `app.api_token`。开发服务器将 API 请求转发到 `127.0.0.1:8000`；修改后端端口时需同步调整 Vite 的代理目标。访问 `http://127.0.0.1:8000/docs` 打开交互文档。统一入口仅启动后端，前端开发服务器由 pnpm 单独启动。
 
-调试时可以用 `uv run python -m app.worker --once` 执行一轮：最多处理一个队列操作和 20 个需要同步的邮箱。
+本地使用构建后的页面时，在 `frontend` 目录安装依赖并执行 `pnpm build`，然后在项目根目录执行 `uv run python run.py`，从 `http://127.0.0.1:8000/` 访问，无需启动 Vite。前端功能、配置与测试见 [前端说明](docs/frontend.md)。
+
+需要独立管理进程时，仍可分别使用 `uv run uvicorn main:app --reload` 和 `uv run python -m app.worker`。只启动 API 时，创建操作会等待 Worker，收件也不会同步。调试时可以用 `uv run python -m app.worker --once` 执行一轮：最多处理一个队列操作和 20 个需要同步的邮箱。
 
 ## 创建与收件
+
+网页支持选择供应商和有效期创建邮箱、查看操作状态、分页浏览邮箱及邮件、复制地址与读取纯文本正文。页面每 5 秒读取本地收件缓存；上游同步频率由 Worker 配置决定。登录令牌只保存在当前标签页的 `sessionStorage`，退出时清除。
 
 业务接口使用 `Authorization: Bearer <app.api_token>` 鉴权。在交互文档的 Authorize 中填入令牌即可调用，也可以使用 [test_main.http](test_main.http) 中的请求示例。
 
@@ -136,6 +148,16 @@ providers:
 ```bash
 uv run pytest
 ```
+
+前端检查在 `frontend` 目录执行：
+
+```bash
+pnpm check
+pnpm build
+pnpm test
+```
+
+首次运行浏览器测试前，执行 `pnpm exec playwright install chromium` 安装测试浏览器。
 
 `GET /health/live` 和 `GET /health/ready` 不需要鉴权，其余业务接口需要 Bearer 令牌。供应商协议及验证范围见上方接入文档；架构、数据模型、操作状态机和扩展约定见 [设计文档](docs/design.md)。
 

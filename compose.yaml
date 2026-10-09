@@ -1,0 +1,63 @@
+name: temp-mail
+
+x-runtime: &runtime
+  image: temp-mail:local
+  build:
+    context: .
+  restart: unless-stopped
+  init: true
+  working_dir: /app
+  stop_grace_period: 30s
+  volumes:
+    - type: bind
+      source: ./config.yaml
+      target: /app/config.yaml
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ./data
+      target: /app/data
+      bind:
+        create_host_path: false
+
+services:
+  api:
+    <<: *runtime
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3).close()"
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  worker:
+    <<: *runtime
+    command: ["python", "-m", "app.worker"]
+    depends_on:
+      api:
+        condition: service_healthy
+
+  init:
+    profiles: [tools]
+    image: temp-mail:local
+    build:
+      context: .
+    working_dir: /app
+    command:
+      - python
+      - scripts/init_config.py
+      - --output
+      - /workspace/config.yaml
+      - --template
+      - /app/config.example.yaml
+    volumes:
+      - type: bind
+        source: .
+        target: /workspace

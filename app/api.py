@@ -2,12 +2,14 @@ import secrets
 import sqlite3
 from contextlib import asynccontextmanager
 from dataclasses import asdict
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.staticfiles import StaticFiles
 
 from app.config import Settings
 from app.errors import ServiceError
@@ -19,6 +21,7 @@ bearer = HTTPBearer(auto_error=False)
 IdempotencyKey = Annotated[str, Header(alias="Idempotency-Key", min_length=1, max_length=200)]
 Limit = Annotated[int, Query(ge=1, le=100)]
 Offset = Annotated[int, Query(ge=0)]
+FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
 
 def create_app(settings: Settings | None = None, registry: Registry | None = None) -> FastAPI:
@@ -28,6 +31,16 @@ def create_app(settings: Settings | None = None, registry: Registry | None = Non
         yield
 
     app = FastAPI(title="Temp Mail Gateway", version="0.1.0", lifespan=lifespan)
+
+    if (FRONTEND_DIST / "index.html").is_file():
+        index_file = FRONTEND_DIST / "index.html"
+
+        @app.get("/", include_in_schema=False)
+        def frontend():
+            return FileResponse(index_file, headers={"Cache-Control": "no-cache"})
+
+        if (FRONTEND_DIST / "assets").is_dir():
+            app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="frontend-assets")
 
     def require_auth(request: Request, credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)]):
         expected = request.app.state.service.settings.api_token
