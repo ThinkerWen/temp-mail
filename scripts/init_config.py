@@ -2,7 +2,6 @@
 
 import argparse
 import os
-import secrets
 import sys
 from pathlib import Path
 
@@ -36,7 +35,7 @@ def initialize_config(template: Path, output: Path) -> None:
         raise ValueError("Template requires app and providers mappings")
     if "worker" in document and not isinstance(document["worker"], dict):
         raise ValueError("Template worker section must be a mapping")
-    document["app"]["api_token"] = secrets.token_urlsafe(32)
+    document["app"]["api_token"] = "default-access-api-token"
     document["app"]["encryption_key"] = Fernet.generate_key().decode()
     rendered = yaml.safe_dump(document, sort_keys=False, allow_unicode=True)
     descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -51,7 +50,7 @@ def initialize_config(template: Path, output: Path) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Generate API and encryption keys in a new private configuration file")
+    parser = argparse.ArgumentParser(description="Create a private configuration with the default API token and a new encryption key")
     parser.add_argument("--output", type=Path, default=Path("config.yaml"))
     parser.add_argument("--template", type=Path, default=Path("config.example.yaml"))
     args = parser.parse_args(argv)

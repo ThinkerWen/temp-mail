@@ -28,6 +28,7 @@ x-data-volume: &data-volume
 services:
   api:
     <<: *runtime
+    command: ["python", "-m", "app.server", "--host", "0.0.0.0", "--port", "8000"]
     volumes:
       - *config-volume
       - *data-volume

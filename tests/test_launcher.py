@@ -6,6 +6,7 @@ import socket
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -242,3 +243,111 @@ def test_server_rejects_invalid_ports_before_starting_uvicorn(uvicorn_run, port)
 def test_server_accepts_port_boundaries(uvicorn_run, port):
     server.main(["--port", port])
     assert uvicorn_run.call_args.kwargs["port"] == int(port)
+
+
+@pytest.fixture
+def docker_launcher(isolated_project):
+    scripts = isolated_project / "scripts"
+    scripts.mkdir()
+    for name in ("start.sh", "init_config.py"):
+        shutil.copy2(PROJECT_ROOT / "scripts" / name, scripts / name)
+    shutil.copy2(isolated_project / "config.yaml", isolated_project / "config.example.yaml")
+    config_path = isolated_project / "config" / "config.yaml"
+
+    @contextmanager
+    def start():
+        database = Database(str(config_path.parent / "data" / "test.db"))
+        database.initialize()
+        with database.connect(write=True) as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO operations
+                (id, owner_id, kind, idempotency_key, request_hash, payload, provider_id, status, created_at, updated_at)
+                VALUES ('op_docker', 'local', 'create', 'docker', 'test', '{}', 'unavailable-test-provider', 'pending', ?, ?)""",
+                (utcnow(), utcnow()),
+            )
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        log_path = isolated_project / "docker.log"
+        env = {**os.environ, "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}", "PORT": str(port)}
+        env["TEMP_MAIL_CONFIG"] = str(config_path)
+        with log_path.open("w") as log_file:
+            process = subprocess.Popen(
+                ["bash", str(scripts / "start.sh")],
+                cwd=isolated_project.parent,
+                env=env,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+            try:
+                try:
+                    wait_until(lambda: "Worker tick:" in log_path.read_text() or process.poll() is not None)
+                except AssertionError as exc:
+                    raise AssertionError(log_path.read_text()) from exc
+                log = log_path.read_text()
+                assert process.poll() is None, log
+                api_pid = int(re.search(r"Started server process \[(\d+)\]", log)[1])
+                worker_pid = int(re.search(r"PID (\d+) \| .* - Worker tick:", log)[1])
+                yield process, port, {"api": api_pid, "worker": worker_pid}, config_path, log_path
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=20)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=5)
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    return start
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell and signal integration checks")
+@pytest.mark.parametrize("shutdown", ["SIGTERM", "api", "worker"])
+def test_docker_starts_both_services_and_cleans_up_on_exit(docker_launcher, shutdown):
+    with docker_launcher() as (process, port, pids, config_path, log_path):
+        with httpx.Client(base_url=f"http://127.0.0.1:{port}", trust_env=False, timeout=2) as client:
+            assert client.get("/health/ready").status_code == 200
+            database = Database(str(config_path.parent / "data" / "test.db"))
+
+            def operation_processed():
+                with database.connect() as conn:
+                    row = conn.execute("SELECT status, error_code FROM operations WHERE id='op_docker'").fetchone()
+                    return tuple(row) == ("failed", "PROVIDER_UNAVAILABLE")
+
+            wait_until(operation_processed)
+            if shutdown == "SIGTERM":
+                process.terminate()
+                assert process.wait(timeout=20) == 0, log_path.read_text()
+            else:
+                os.kill(pids[shutdown], signal.SIGKILL)
+                assert process.wait(timeout=20) != 0, log_path.read_text()
+            wait_until(lambda: all(not process_exists(pid) for pid in pids.values()), timeout=5)
+            with pytest.raises(httpx.ConnectError):
+                client.get("/health/ready")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell integration check")
+def test_docker_initializes_config_once_and_preserves_credentials(docker_launcher):
+    with docker_launcher() as (_, port, _, config_path, _):
+        original = config_path.read_bytes()
+        config = yaml.safe_load(original)
+        token = config["app"]["api_token"]
+        assert token == "default-access-api-token"
+        Fernet(config["app"]["encryption_key"].encode())
+        assert config_path.stat().st_mode & 0o777 == 0o600
+        with httpx.Client(base_url=f"http://127.0.0.1:{port}", trust_env=False, timeout=2) as client:
+            response = client.get("/v1/mailboxes", headers={"Authorization": f"Bearer {token}"})
+            assert response.status_code == 200
+            assert response.json()["items"] == []
+    with docker_launcher() as (_, port, _, config_path, log_path):
+        assert config_path.read_bytes() == original
+        assert "Created configuration" not in log_path.read_text()
+        with httpx.Client(base_url=f"http://127.0.0.1:{port}", trust_env=False, timeout=2) as client:
+            response = client.get("/v1/mailboxes", headers={"Authorization": f"Bearer {token}"})
+            assert response.status_code == 200
+            assert response.json()["items"] == []

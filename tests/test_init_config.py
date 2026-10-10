@@ -27,7 +27,7 @@ def test_cli_defaults_create_private_loadable_config_and_preserve_template_optio
     assert result.returncode == 0, result.stderr
     output = tmp_path / "config.yaml"
     settings = Settings.from_yaml(output)
-    assert len(settings.api_token) >= 32
+    assert settings.api_token == "default-access-api-token"
     cipher = Fernet(settings.encryption_key.encode())
     assert cipher.decrypt(cipher.encrypt(b"persisted-upstream-token")) == b"persisted-upstream-token"
     assert stat.S_IMODE(output.stat().st_mode) == 0o600
@@ -45,7 +45,7 @@ def test_explicit_paths_generate_distinct_keys_without_changing_working_director
     for output in outputs:
         assert init_config.main(["--output", str(output), "--template", str(template)]) == 0
     first, second = [Settings.from_yaml(output) for output in outputs]
-    assert first.api_token != second.api_token
+    assert first.api_token == second.api_token == "default-access-api-token"
     assert first.encryption_key != second.encryption_key
     captured = capsys.readouterr()
     for value in (first.api_token, second.api_token, first.encryption_key, second.encryption_key):

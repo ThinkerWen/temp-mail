@@ -9,6 +9,7 @@
 !app/**
 !scripts/
 !scripts/init_config.py
+!scripts/start.sh
 !frontend/
 !frontend/package.json
 !frontend/pnpm-lock.yaml

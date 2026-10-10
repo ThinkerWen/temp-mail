@@ -1,12 +1,31 @@
 # Docker 部署
 
-需要 Docker 和 Compose v2。部署直接拉取 Docker Hub 发布的镜像，包含网页、API 和 Worker，宿主机无需安装 Python、Node.js 或下载项目源码。API 和 Worker 分别运行，共享配置与 SQLite 数据。源码开发见 [前端开发与构建](frontend.md#开发与构建)。
+部署直接拉取 Docker Hub 发布的镜像，包含网页、API 和 Worker，宿主机无需安装 Python、Node.js 或下载项目源码。可以使用 Docker 单容器启动，也可以通过 Compose v2 将 API 和 Worker 分别运行，共享配置与 SQLite 数据。源码开发见 [前端开发与构建](frontend.md#开发与构建)。
 
 镜像地址：[`designerwang/temp-mail`](https://hub.docker.com/r/designerwang/temp-mail)，默认标签为 `latest`。
 
+## 单容器启动
+
+镜像默认同时启动 API 和 Worker，首次启动会自动生成配置；已有配置会保留：
+
+```bash
+docker pull designerwang/temp-mail:latest
+docker run -d --name temp-mail --stop-timeout 20 -p 127.0.0.1:8000:8000 designerwang/temp-mail:latest
+```
+
+打开 `http://127.0.0.1:8000/`，使用 `app.api_token` 登录。首次生成配置时，默认令牌为 `default-access-api-token`，加密密钥仍随机生成；已有配置继续使用原令牌和密钥。令牌不会输出到日志，可通过以下命令查看当前值：
+
+```bash
+docker exec temp-mail python -c 'import yaml; print(yaml.safe_load(open("/app/config/config.yaml"))["app"]["api_token"])'
+```
+
+默认配置路径为 `/app/config/config.yaml`，可通过 `TEMP_MAIL_CONFIG` 指定。API 监听 `0.0.0.0`，端口读取环境变量 `PORT`，默认为 `8000`；更改端口时需同步调整 Docker 端口映射。API 就绪后再启动 Worker，任一进程退出时会停止另一进程并退出容器。
+
+未挂载目录时，删除并重建容器会丢失配置和邮件数据，登录令牌恢复为 `default-access-api-token`，加密密钥重新随机生成。如需保留数据，在首次 `docker run` 时增加 `-v temp-mail-config:/app/config`，将配置及默认路径下的数据库保存到 Docker 卷。
+
 ## 首次部署
 
-创建一个部署目录，在该目录下载 Compose 文件。以下命令适用于 Linux/macOS：
+使用 Compose 时，创建一个部署目录，在该目录下载 Compose 文件。以下命令适用于 Linux/macOS：
 
 ```bash
 mkdir -p temp-mail
@@ -17,7 +36,7 @@ docker compose --profile tools pull
 docker compose run --rm --user "$(id -u):$(id -g)" init
 ```
 
-`--profile tools pull` 同时准备运行服务与初始化工具所用的镜像。`init` 根据镜像内模板生成 `config/config.yaml`，创建 API 令牌与 Fernet 密钥，拒绝覆盖已有文件。`--user` 使文件归当前宿主用户所有。Windows 可手动下载 Compose 文件、创建 `config` 和 `data` 目录，拉取镜像后执行 `docker compose run --rm init`。
+`--profile tools pull` 同时准备运行服务与初始化工具所用的镜像。`init` 根据镜像内模板生成 `config/config.yaml`，将 API 令牌设为 `default-access-api-token`，随机生成 Fernet 密钥，并拒绝覆盖已有文件。`--user` 使文件归当前宿主用户所有。Windows 可手动下载 Compose 文件、创建 `config` 和 `data` 目录，拉取镜像后执行 `docker compose run --rm init`。
 
 按需编辑供应商配置，然后启动：
 
@@ -84,6 +103,8 @@ docker compose restart api worker
 ```
 
 更改数据库路径不会迁移数据，新的路径仍须位于持久化挂载内。更换密钥不会重新加密已有凭据，网页也不提供密钥编辑。
+
+从仅默认启动 API 的旧镜像升级时，先同步新版 `compose.yaml` 中 API 服务的 `command`。它会覆盖镜像的双进程默认启动方式，避免与独立 Worker 容器重复运行。
 
 升级时拉取已发布镜像并重新创建服务，网页会随镜像一起更新。使用固定版本时，先修改 `x-image` 的标签：
 
