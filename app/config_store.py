@@ -21,9 +21,10 @@ from app.config import PROVIDER_OPTIONS, Settings, _ConfigLoader
 from app.errors import ServiceError
 from app.limits import MAX_MAILBOX_TTL_SECONDS, MAX_WORKER_CONCURRENCY, MIN_MAILBOX_TTL_SECONDS
 from app.providers import TempMailLolProvider, TempMailOrgProvider
+from app.providers.twenty_two_do import TwentyTwoDoProvider
 
-PROVIDER_CLASSES = {"temp-mail-org": TempMailOrgProvider, "tempmail-lol": TempMailLolProvider}
-INDEX_URLS = {"temp-mail-org": "https://temp-mail.org/", "tempmail-lol": "https://tempmail.lol/"}
+PROVIDER_CLASSES = {"temp-mail-org": TempMailOrgProvider, "tempmail-lol": TempMailLolProvider, "22-do": TwentyTwoDoProvider}
+INDEX_URLS = {"temp-mail-org": "https://temp-mail.org/", "tempmail-lol": "https://tempmail.lol/", "22-do": "https://22.do/"}
 PositiveNumber = Annotated[float, Field(gt=0, allow_inf_nan=False)]
 PositiveInteger = Annotated[int, Field(gt=0)]
 
@@ -46,7 +47,7 @@ class WorkerUpdate(ConfigModel):
 
 
 class ProviderUpdate(ConfigModel):
-    id: Literal["temp-mail-org", "tempmail-lol"]
+    id: Literal["temp-mail-org", "tempmail-lol", "22-do"]
     enabled: bool
     index_url: Annotated[str, Field(max_length=4096)] | None
     base_url: Annotated[str, Field(min_length=1, max_length=4096)]

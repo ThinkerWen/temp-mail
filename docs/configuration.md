@@ -58,7 +58,7 @@ API 和 Worker 必须读取同一份配置。两种部署方式的配置文件�
 
 本地有效期上限不会延长上游邮箱寿命，也不会修改已有邮箱的到期时间。供应商返回到期时间时，创建结果取请求期限与上游期限中较早的时间。
 
-供应商特有参数与协议见 [temp-mail.org](providers/temp-mail-org.md) 和 [TempMail.lol](providers/tempmail-lol.md)。
+供应商特有参数与协议见 [temp-mail.org](providers/temp-mail-org.md)、[TempMail.lol](providers/tempmail-lol.md) 和 [22.do](providers/22-do.md)。
 
 ## 在线修改与热更新
 

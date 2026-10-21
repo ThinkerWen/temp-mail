@@ -11,6 +11,7 @@ from app.limits import MAX_WORKER_CONCURRENCY, validate_max_ttl_seconds
 PROVIDER_OPTIONS = {
     "temp-mail-org": {"base_url", "timeout_seconds", "impersonate", "proxy", "max_ttl_seconds"},
     "tempmail-lol": {"base_url", "timeout_seconds", "impersonate", "proxy", "max_ttl_seconds"},
+    "22-do": {"base_url", "timeout_seconds", "impersonate", "proxy", "max_ttl_seconds"},
 }
 
 

@@ -50,7 +50,7 @@ def test_default_registry_construction_is_offline_and_advertises_receive_only(se
 
     monkeypatch.setattr("app.providers.temp_mail_org.requests.Session", unexpected_session)
     registry = factory.build_registry(settings)
-    assert [item.id for item in registry.all()] == ["temp-mail-org", "tempmail-lol"]
+    assert [item.id for item in registry.all()] == ["temp-mail-org", "tempmail-lol", "22-do"]
     adapter = registry.get("temp-mail-org")
     assert adapter.impersonate == "chrome110"
     assert adapter.capabilities.receive is True
@@ -60,7 +60,7 @@ def test_default_registry_construction_is_offline_and_advertises_receive_only(se
     assert registry.select(["receive"], 3600).id == "temp-mail-org"
     disabled_settings = replace(settings, providers={**settings.providers, "temp-mail-org": ProviderSettings(enabled=False)})
     disabled = factory.build_registry(disabled_settings)
-    assert [item.id for item in disabled.all()] == ["tempmail-lol"]
+    assert [item.id for item in disabled.all()] == ["tempmail-lol", "22-do"]
 
 
 @pytest.mark.parametrize("proxy", ["", "  ", "http://user:password@127.0.0.1:7890", "socks5h://127.0.0.1:1080"])

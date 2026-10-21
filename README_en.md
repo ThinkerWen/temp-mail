@@ -34,6 +34,7 @@
 | --- | --- | --- | --- |
 | [temp-mail.org](https://temp-mail.org/) | [temp-mail.org](https://temp-mail.org/) | Create mailboxes, receive emails | [Integration guide](docs/providers/temp-mail-org.md) |
 | [TempMail.lol](https://tempmail.lol/) | [tempmail.lol](https://tempmail.lol/) | Create mailboxes, receive emails | [Integration guide](docs/providers/tempmail-lol.md) |
+| [22.do](https://22.do/) | [22.do](https://22.do/) | Create mailboxes, receive emails | [Integration guide](docs/providers/22-do.md) |
 
 Sending emails and downloading attachments are not currently supported.
 

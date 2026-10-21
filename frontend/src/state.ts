@@ -90,7 +90,7 @@ export function remaining(expires: string, now: number) {
   );
 }
 export function providerName(id: string) {
-  return { 'temp-mail-org': 'Temp Mail', 'tempmail-lol': 'TempMail.lol' }[id] ?? id;
+  return { 'temp-mail-org': 'Temp Mail', 'tempmail-lol': 'TempMail.lol', '22-do': '22.do' }[id] ?? id;
 }
 
 export function formatDuration(seconds: number) {

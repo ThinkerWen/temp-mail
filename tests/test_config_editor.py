@@ -11,6 +11,7 @@ from app.api import create_app
 from app.config import Settings
 from app.config_store import ConfigStore
 from app.errors import ServiceError
+from app.runtime import Runtime
 
 
 @pytest.fixture
@@ -70,9 +71,9 @@ def test_config_get_is_authenticated_and_never_returns_credentials(client, docum
         "create_concurrency": 2,
         "receive_concurrency": 4,
     }
-    assert [item["id"] for item in body["providers"]] == ["tempmail-lol", "temp-mail-org"]
-    assert [item["enabled"] for item in body["providers"]] == [False, False]
-    assert [item["proxy_configured"] for item in body["providers"]] == [True, False]
+    assert [item["id"] for item in body["providers"]] == ["tempmail-lol", "temp-mail-org", "22-do"]
+    assert [item["enabled"] for item in body["providers"]] == [False, False, False]
+    assert [item["proxy_configured"] for item in body["providers"]] == [True, False, False]
     assert body["providers"][1]["impersonate"] == "chrome110"
     for secret in (document["app"]["api_token"], document["app"]["encryption_key"], "private-proxy-secret"):
         assert secret not in response.text
@@ -143,12 +144,12 @@ def test_database_path_save_does_not_create_or_migrate_database(client, config_f
 def test_reordering_providers_preserves_secrets_and_other_sections(client, config_file, document, proxy_value):
     items = providers(client)[::-1]
     if proxy_value != "omitted":
-        items[1]["proxy"] = proxy_value
-    items[0]["enabled"] = True
+        items[-1]["proxy"] = proxy_value
+    items[1]["enabled"] = True
     response = client.put("/v1/config", json=patch(client, providers=items))
     assert response.status_code == 200
     saved = yaml.safe_load(config_file.read_text())
-    assert list(saved["providers"]) == ["temp-mail-org", "tempmail-lol"]
+    assert list(saved["providers"]) == ["22-do", "temp-mail-org", "tempmail-lol"]
     assert saved["providers"]["tempmail-lol"]["proxy"] == document["providers"]["tempmail-lol"]["proxy"]
     assert saved["app"] == document["app"]
     assert saved["worker"] == document["worker"]
@@ -362,6 +363,39 @@ def test_provider_validation_does_not_open_network_sessions(client, monkeypatch)
     assert response.status_code == 200
 
 
+def test_missing_22_do_can_be_enabled_and_disabled_for_api_and_worker_without_restart(client, config_file, monkeypatch):
+    def unexpected(*args, **kwargs):
+        pytest.fail("Provider configuration must stay offline")
+
+    monkeypatch.setattr("app.providers.twenty_two_do.requests.Session", unexpected)
+    worker = Runtime(Settings.from_yaml(config_file))
+    assert worker.refresh().registry.all() == []
+    items = providers(client)
+    provider = next(item for item in items if item["id"] == "22-do")
+    assert provider["enabled"] is False
+    assert provider["index_url"] == "https://22.do/"
+    assert provider["base_url"] == "https://22.do"
+    assert provider["max_ttl_seconds"] == 86400
+    provider.update(enabled=True, timeout_seconds=9, max_ttl_seconds=7200, proxy="http://localhost:7890")
+    response = client.put("/v1/config", json=patch(client, providers=items))
+    assert response.status_code == 200
+    assert response.json()["restart_required"] is False
+    assert [item["id"] for item in client.get("/v1/capabilities").json()["providers"]] == ["22-do"]
+    for service in (client.app.state.service, worker.refresh()):
+        adapter = service.registry.get("22-do")
+        assert adapter.timeout_seconds == 9
+        assert adapter.proxy == "http://localhost:7890"
+        assert adapter.capabilities.max_ttl_seconds == 7200
+    saved = Settings.from_yaml(config_file)
+    assert saved.providers["22-do"].enabled is True
+    assert saved.providers["22-do"].options["max_ttl_seconds"] == 7200
+    provider["enabled"] = False
+    response = client.put("/v1/config", json=patch(client, providers=items))
+    assert response.status_code == 200
+    assert client.app.state.service.registry.all() == []
+    assert worker.refresh().registry.all() == []
+
+
 def test_read_only_configuration_rejects_save_without_replacement(client, config_file):
     update = patch(client, worker={"poll_seconds": 8})
     before = config_file.read_bytes()
@@ -417,7 +451,7 @@ def test_nonobject_save_body_has_generic_config_error(client, body):
 def test_disabled_and_missing_providers_expose_configured_capabilities(client):
     response = client.get("/v1/config")
     assert response.status_code == 200
-    for provider, expected in zip(response.json()["providers"], [3600, 86400], strict=True):
+    for provider, expected in zip(response.json()["providers"], [3600, 86400, 86400], strict=True):
         assert provider["enabled"] is False
         assert provider["max_ttl_seconds"] == expected
         assert provider["capabilities"]["max_ttl_seconds"] == expected

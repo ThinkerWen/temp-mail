@@ -105,11 +105,24 @@ def test_only_explicit_yaml_providers_are_registered_and_empty_mapping_disables_
 def test_direct_settings_keep_default_providers_without_shared_mutable_options(document):
     first = Settings(**document["app"])
     second = Settings(**document["app"])
-    assert list(first.providers) == ["temp-mail-org", "tempmail-lol"]
+    assert list(first.providers) == ["temp-mail-org", "tempmail-lol", "22-do"]
     first.providers["temp-mail-org"].options["proxy"] = "http://user:private-proxy-password@localhost:7890"
     assert "proxy" not in second.providers["temp-mail-org"].options
     assert "private-proxy-password" not in repr(first)
     assert ProviderSettings().enabled is True
+
+
+def test_example_config_registers_22_do_after_existing_providers(document, tmp_path):
+    example = yaml.safe_load((Path(__file__).resolve().parents[1] / "config.example.yaml").read_text())
+    example["app"] = document["app"]
+    settings = Settings.from_yaml(write_config(tmp_path / "config.yaml", example))
+    registry = build_registry(settings)
+    assert [provider.id for provider in registry.all()] == ["temp-mail-org", "tempmail-lol", "22-do"]
+    provider = registry.get("22-do")
+    assert provider.base_url == "https://22.do"
+    assert provider.impersonate == "chrome110"
+    assert provider.capabilities.max_ttl_seconds == 86400
+    assert settings.providers["22-do"].index_url == "https://22.do/"
 
 
 def test_registry_construction_neither_creates_database_nor_adds_simulated_tables(document, tmp_path):

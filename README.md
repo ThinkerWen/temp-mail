@@ -34,6 +34,7 @@
 | --- | --- | --- | --- |
 | [temp-mail.org](https://temp-mail.org/) | [temp-mail.org](https://temp-mail.org/) | 创建、收件 | [接入说明](docs/providers/temp-mail-org.md) |
 | [TempMail.lol](https://tempmail.lol/) | [tempmail.lol](https://tempmail.lol/) | 创建、收件 | [接入说明](docs/providers/tempmail-lol.md) |
+| [22.do](https://22.do/) | [22.do](https://22.do/) | 创建、收件 | [接入说明](docs/providers/22-do.md) |
 
 目前暂不支持发件和附件下载。
 

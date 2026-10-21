@@ -10,6 +10,7 @@ from app.providers import TempMailLolProvider, TempMailOrgProvider
 from app.providers.base import ProviderError, ProviderMailbox
 from app.providers.factory import build_registry
 from app.providers.registry import Registry
+from app.providers.twenty_two_do import TwentyTwoDoProvider
 from tests.fakes import Response, ScriptedTransport
 from tests.fakes import org_listing as listing
 
@@ -23,7 +24,9 @@ def settings(tmp_path):
     )
 
 
-@pytest.mark.parametrize(("provider_class", "default"), [(TempMailOrgProvider, 86400), (TempMailLolProvider, 3600)])
+@pytest.mark.parametrize(
+    ("provider_class", "default"), [(TempMailOrgProvider, 86400), (TempMailLolProvider, 3600), (TwentyTwoDoProvider, 86400)]
+)
 def test_max_ttl_capabilities_are_isolated_per_instance(provider_class, default):
     original_capabilities = provider_class.capabilities
     changed = provider_class(max_ttl_seconds=172800)
@@ -37,7 +40,7 @@ def test_max_ttl_capabilities_are_isolated_per_instance(provider_class, default)
 
 
 @pytest.mark.parametrize("value", [None, True, 59, 31536001, 3600.0, "3600"])
-@pytest.mark.parametrize("provider_class", [TempMailOrgProvider, TempMailLolProvider])
+@pytest.mark.parametrize("provider_class", [TempMailOrgProvider, TempMailLolProvider, TwentyTwoDoProvider])
 def test_invalid_ttl_limits_are_rejected_in_settings_and_adapter(settings, provider_class, value):
     with pytest.raises(ValueError):
         provider_class(max_ttl_seconds=value)
@@ -50,7 +53,7 @@ def test_invalid_ttl_limits_are_rejected_in_settings_and_adapter(settings, provi
         )
 
 
-@pytest.mark.parametrize("provider_class", [TempMailOrgProvider, TempMailLolProvider])
+@pytest.mark.parametrize("provider_class", [TempMailOrgProvider, TempMailLolProvider, TwentyTwoDoProvider])
 def test_adapter_rejects_above_configured_limit_without_network(provider_class):
     def no_network():
         pytest.fail("Rejected mailbox creation must not call the provider")

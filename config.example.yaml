@@ -34,3 +34,11 @@ providers:
     impersonate: chrome110
     max_ttl_seconds: 3600
     proxy: null
+  22-do:
+    enabled: true
+    index_url: https://22.do/
+    base_url: https://22.do
+    timeout_seconds: 15
+    impersonate: chrome110
+    max_ttl_seconds: 86400
+    proxy: null
