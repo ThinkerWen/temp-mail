@@ -2,6 +2,7 @@ import os
 from dataclasses import dataclass, field
 from math import isfinite
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import yaml
 from cryptography.fernet import Fernet
@@ -12,6 +13,16 @@ PROVIDER_OPTIONS = {
     "temp-mail-org": {"base_url", "timeout_seconds", "impersonate", "proxy", "max_ttl_seconds"},
     "tempmail-lol": {"base_url", "timeout_seconds", "impersonate", "proxy", "max_ttl_seconds"},
     "22-do": {"base_url", "timeout_seconds", "impersonate", "proxy", "max_ttl_seconds"},
+    "cloudflare-temp-email": {
+        "base_url",
+        "timeout_seconds",
+        "impersonate",
+        "proxy",
+        "max_ttl_seconds",
+        "domain",
+        "admin_password",
+        "site_password",
+    },
 }
 
 
@@ -53,10 +64,11 @@ class ProviderSettings:
         if self.index_url is not None and not isinstance(self.index_url, str):
             raise ValueError("Provider index_url must be a string or null")
         options = dict(_mapping(self.options, "provider options"))
-        if "proxy" in options:
-            if options["proxy"] is not None and not isinstance(options["proxy"], str):
-                raise ValueError("Provider proxy must be a URL string or null")
-            options["proxy"] = options["proxy"].strip() or None if options["proxy"] is not None else None
+        for name in ("proxy", "domain", "admin_password", "site_password"):
+            if name in options:
+                if options[name] is not None and not isinstance(options[name], str):
+                    raise ValueError(f"Provider {name} must be a string or null")
+                options[name] = options[name].strip() or None if options[name] is not None else None
         object.__setattr__(self, "options", options)
 
 
@@ -70,7 +82,9 @@ class Settings:
     worker_poll_seconds: float = 1
     create_concurrency: int = 2
     receive_concurrency: int = 4
-    providers: dict[str, ProviderSettings] = field(default_factory=lambda: {name: ProviderSettings() for name in PROVIDER_OPTIONS})
+    providers: dict[str, ProviderSettings] = field(
+        default_factory=lambda: {name: ProviderSettings(enabled=name != "cloudflare-temp-email") for name in PROVIDER_OPTIONS}
+    )
 
     config_path: Path | None = field(default=None, repr=False, compare=False)
 
@@ -104,6 +118,25 @@ class Settings:
                 validate_max_ttl_seconds(options["max_ttl_seconds"])
             if "timeout_seconds" in options:
                 _positive_number(options["timeout_seconds"], f"providers.{name}.timeout_seconds")
+            if name == "cloudflare-temp-email" and provider.enabled:
+                try:
+                    parsed = urlsplit(options.get("base_url", ""))
+                    valid = (
+                        parsed.scheme in {"http", "https"}
+                        and parsed.hostname
+                        and not parsed.hostname.lower().rstrip(".").endswith(".invalid")
+                        and parsed.hostname.lower() != "invalid"
+                        and parsed.username is None
+                        and parsed.password is None
+                        and not parsed.query
+                        and not parsed.fragment
+                        and (parsed.port is None or parsed.port > 0)
+                        and not any(char.isspace() for char in options.get("base_url", ""))
+                    )
+                except ValueError:
+                    valid = False
+                if not valid:
+                    raise ValueError("providers.cloudflare-temp-email.base_url must be configured before enabling")
 
     @classmethod
     def from_yaml(cls, path: str | Path | None = None):

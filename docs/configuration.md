@@ -58,7 +58,7 @@ API 和 Worker 必须读取同一份配置。两种部署方式的配置文件�
 
 本地有效期上限不会延长上游邮箱寿命，也不会修改已有邮箱的到期时间。供应商返回到期时间时，创建结果取请求期限与上游期限中较早的时间。
 
-供应商特有参数与协议见 [temp-mail.org](providers/temp-mail-org.md)、[TempMail.lol](providers/tempmail-lol.md) 和 [22.do](providers/22-do.md)。
+供应商特有参数与协议见 [temp-mail.org](providers/temp-mail-org.md)、[TempMail.lol](providers/tempmail-lol.md)、[22.do](providers/22-do.md) 和 [Cloudflare Temp Email](providers/cloudflare-temp-email.md)。Cloudflare Temp Email 默认关闭，需填写自己的 Worker API 地址；它还支持收信域名、管理员密码和站点访问密码配置。
 
 ## 在线修改与热更新
 
@@ -73,7 +73,7 @@ API 和 Worker 必须读取同一份配置。两种部署方式的配置文件�
 
 API 保存成功后应用新配置；其他 API 进程在下次请求时检测变化，Worker 最多每秒检测一次。每个在途任务固定使用已选定的配置快照。配置热更新与 `--reload` 代码重载相互独立。
 
-API 令牌和代理不回显，留空表示保留，代理可显式清除。加密密钥不提供网页编辑。修改数据库路径不会迁移数据库，修改密钥也不会重新加密数据；需要重启的字段由页面提示。
+API 令牌、代理及供应商密码不回显，留空表示保留，代理和供应商密码可显式清除。加密密钥不提供网页编辑。修改数据库路径不会迁移数据库，修改密钥也不会重新加密数据；需要重启的字段由页面提示。
 
 ## 保存与异常处理
 

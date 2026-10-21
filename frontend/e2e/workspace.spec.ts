@@ -1,5 +1,13 @@
 import { expect, test, type Page, type Request } from '@playwright/test';
-import type { Capabilities, Mailbox, Message, Operation, Provider } from '../src/types';
+import type {
+  Capabilities,
+  ConfigurationPatch,
+  Mailbox,
+  Message,
+  Operation,
+  Provider,
+  ProviderConfig,
+} from '../src/types';
 
 const token = 'e2e-only-token-not-a-real-credential';
 const capabilities: Capabilities = {
@@ -29,17 +37,19 @@ function configuration() {
       create_concurrency: 2,
       receive_concurrency: 4,
     },
-    providers: providers.map((provider, index) => ({
-      id: provider.id,
-      enabled: index === 0,
-      index_url: index === 0 ? 'https://temp-mail.org/' : 'https://tempmail.lol/',
-      base_url: index === 0 ? 'https://web2.temp-mail.org' : 'https://api.tempmail.lol/v2',
-      timeout_seconds: 15,
-      max_ttl_seconds: provider.capabilities.max_ttl_seconds,
-      capabilities: { ...provider.capabilities },
-      impersonate: 'chrome110',
-      proxy_configured: index === 0,
-    })),
+    providers: providers.map(
+      (provider, index): ProviderConfig => ({
+        id: provider.id,
+        enabled: index === 0,
+        index_url: index === 0 ? 'https://temp-mail.org/' : 'https://tempmail.lol/',
+        base_url: index === 0 ? 'https://web2.temp-mail.org' : 'https://api.tempmail.lol/v2',
+        timeout_seconds: 15,
+        max_ttl_seconds: provider.capabilities.max_ttl_seconds,
+        capabilities: { ...provider.capabilities },
+        impersonate: 'chrome110',
+        proxy_configured: index === 0,
+      }),
+    ),
   };
 }
 
@@ -172,8 +182,8 @@ async function mockApi(page: Page): Promise<MockState> {
         if (body.worker) state.config.worker = { ...state.config.worker, ...body.worker };
         if (body.providers) {
           state.config.providers = body.providers.map(
-            (provider: ReturnType<typeof configuration>['providers'][number] & { proxy?: string | null }) => {
-              const { proxy, ...fields } = provider;
+            (provider: NonNullable<ConfigurationPatch['providers']>[number]) => {
+              const { proxy, admin_password, site_password, ...fields } = provider;
               const previous = state.config.providers.find((item) => item.id === provider.id)!;
               return {
                 ...fields,
@@ -183,6 +193,16 @@ async function mockApi(page: Page): Promise<MockState> {
                     ? false
                     : !!proxy ||
                       !!state.config.providers.find((item) => item.id === provider.id)?.proxy_configured,
+                ...(provider.id === 'cloudflare-temp-email'
+                  ? {
+                      admin_password_configured:
+                        admin_password === null
+                          ? false
+                          : !!admin_password || previous.admin_password_configured,
+                      site_password_configured:
+                        site_password === null ? false : !!site_password || previous.site_password_configured,
+                    }
+                  : {}),
               };
             },
           );
@@ -943,8 +963,8 @@ test('supports English provider dialogs and header controls on mobile', async ({
     fullPage: true,
     animations: 'disabled',
   });
-  await page.getByRole('button', { name: 'Edit TempMail.lol', exact: true }).click();
-  const dialog = page.getByRole('dialog', { name: 'Edit TempMail.lol', exact: true });
+  await page.getByRole('button', { name: 'Edit tempmail.lol', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Edit tempmail.lol', exact: true });
   await expect(dialog.getByLabel('Maximum local lifetime (seconds)', { exact: true })).toHaveValue('600');
   await expect(dialog.getByLabel('API URL', { exact: true })).toBeVisible();
   await page.screenshot({
@@ -1053,16 +1073,16 @@ test('validates independent concurrency limits and keeps their drafts across lan
 test('shows supported provider cards and saves enable switches immediately', async ({ page }, testInfo) => {
   const state = await mockApi(page);
   await connect(page, '/providers');
-  await expect(page.getByRole('switch', { name: '启用 TempMail.lol', exact: true })).not.toBeChecked();
-  await expect(page.getByRole('switch', { name: '启用 Temp Mail', exact: true })).toBeChecked();
+  await expect(page.getByRole('switch', { name: '启用 tempmail.lol', exact: true })).not.toBeChecked();
+  await expect(page.getByRole('switch', { name: '启用 temp-mail.org', exact: true })).toBeChecked();
   await expect(page.getByLabel('API 地址', { exact: true })).toHaveCount(0);
   await expect(page.getByText('temp-mail-org', { exact: true })).toHaveCount(1);
   await expect(page.getByText('tempmail-lol', { exact: true })).toHaveCount(1);
   await page
     .locator('.provider-enable')
-    .filter({ has: page.getByRole('switch', { name: '启用 TempMail.lol', exact: true }) })
+    .filter({ has: page.getByRole('switch', { name: '启用 tempmail.lol', exact: true }) })
     .click();
-  await expect(page.getByRole('switch', { name: '启用 TempMail.lol', exact: true })).toBeChecked();
+  await expect(page.getByRole('switch', { name: '启用 tempmail.lol', exact: true })).toBeChecked();
   expect(state.configWrites).toHaveLength(1);
   const body = state.configWrites[0].postDataJSON();
   expect(Object.keys(body).sort()).toEqual(['providers', 'revision']);
@@ -1076,8 +1096,8 @@ test('shows supported provider cards and saves enable switches immediately', asy
   await page.getByRole('link', { name: '邮箱工作台', exact: true }).click();
   await page.getByRole('button', { name: '新建邮箱', exact: true }).click();
   await page.getByLabel('邮箱供应商', { exact: true }).click();
-  await expect(page.getByRole('option', { name: 'TempMail.lol', exact: true })).toBeVisible();
-  await page.getByRole('option', { name: 'TempMail.lol', exact: true }).click();
+  await expect(page.getByRole('option', { name: 'tempmail.lol', exact: true })).toBeVisible();
+  await page.getByRole('option', { name: 'tempmail.lol', exact: true }).click();
   await page
     .getByRole('dialog')
     .getByRole('button', { name: '取消', exact: true })
@@ -1085,7 +1105,7 @@ test('shows supported provider cards and saves enable switches immediately', asy
     .click();
   await page.getByRole('link', { name: /^供应商/ }).click();
   await page.reload();
-  await expect(page.getByRole('switch', { name: '启用 TempMail.lol', exact: true })).toBeChecked();
+  await expect(page.getByRole('switch', { name: '启用 tempmail.lol', exact: true })).toBeChecked();
   await page.screenshot({
     path: testInfo.outputPath('desktop-provider-cards.png'),
     fullPage: true,
@@ -1093,7 +1113,7 @@ test('shows supported provider cards and saves enable switches immediately', asy
   });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.reload();
-  await expect(page.getByRole('switch', { name: '启用 TempMail.lol', exact: true })).toBeChecked();
+  await expect(page.getByRole('switch', { name: '启用 tempmail.lol', exact: true })).toBeChecked();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({
     path: testInfo.outputPath('mobile-provider-cards.png'),
@@ -1105,8 +1125,8 @@ test('shows supported provider cards and saves enable switches immediately', asy
 test('applies provider lifetime changes to new mailboxes without reloading', async ({ page }) => {
   const state = await mockApi(page);
   await connect(page, '/providers');
-  await page.getByRole('button', { name: '编辑 Temp Mail', exact: true }).click();
-  const dialog = page.getByRole('dialog', { name: '编辑 Temp Mail', exact: true });
+  await page.getByRole('button', { name: '编辑 temp-mail.org', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: '编辑 temp-mail.org', exact: true });
   await dialog.getByLabel('最长本地有效期（秒）', { exact: true }).fill('172800');
   await dialog.getByRole('button', { name: '保存供应商', exact: true }).click();
   await expect(dialog).toHaveCount(0);
@@ -1202,8 +1222,8 @@ test('edits a single provider in a dialog and persists limits and proxy changes'
 }, testInfo) => {
   const state = await mockApi(page);
   await connect(page, '/providers');
-  await page.getByRole('button', { name: '编辑 TempMail.lol', exact: true }).click();
-  const dialog = page.getByRole('dialog', { name: '编辑 TempMail.lol', exact: true });
+  await page.getByRole('button', { name: '编辑 tempmail.lol', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: '编辑 tempmail.lol', exact: true });
   await expect(dialog).toBeVisible();
   await expect(dialog.getByLabel('请求超时（秒）', { exact: true })).toHaveValue('15');
   await dialog.getByLabel('请求超时（秒）', { exact: true }).fill('25');
@@ -1231,7 +1251,7 @@ test('edits a single provider in a dialog and persists limits and proxy changes'
     proxy,
   );
   await page.reload();
-  await page.getByRole('button', { name: '编辑 TempMail.lol', exact: true }).click();
+  await page.getByRole('button', { name: '编辑 tempmail.lol', exact: true }).click();
   await expect(dialog.getByLabel('请求超时（秒）', { exact: true })).toHaveValue('25');
   await expect(dialog.getByLabel('最长本地有效期（秒）', { exact: true })).toHaveValue('172800');
   await expect(dialog.getByLabel('替换代理地址', { exact: true })).toHaveValue('');
@@ -1242,7 +1262,7 @@ test('edits a single provider in a dialog and persists limits and proxy changes'
   expect(state.configWrites[1].postDataJSON().providers[1].proxy).toBeNull();
   await page.setViewportSize({ width: 390, height: 844 });
   await page.reload();
-  await page.getByRole('button', { name: '编辑 TempMail.lol', exact: true }).click();
+  await page.getByRole('button', { name: '编辑 tempmail.lol', exact: true }).click();
   await expect(dialog.getByLabel('最长本地有效期（秒）', { exact: true })).toHaveValue('172800');
   await expect(dialog.getByRole('checkbox', { name: '移除已配置代理', exact: true })).toHaveCount(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
@@ -1258,11 +1278,115 @@ test('edits a single provider in a dialog and persists limits and proxy changes'
   });
 });
 
+test('preserves Cloudflare provider settings when toggling or editing another provider', async ({ page }) => {
+  const state = await mockApi(page);
+  state.config.providers.push({
+    ...state.config.providers[0],
+    id: 'cloudflare-temp-email',
+    enabled: false,
+    domain: 'mail.example.test',
+    admin_password_configured: true,
+    site_password_configured: true,
+    base_url: 'https://worker.example.test',
+  });
+  await connect(page, '/providers');
+  await page
+    .locator('.provider-enable')
+    .filter({ has: page.getByRole('switch', { name: '启用 cloudflare temp email', exact: true }) })
+    .click();
+  await expect(page.getByRole('switch', { name: '启用 cloudflare temp email', exact: true })).toBeChecked();
+  await page.getByRole('button', { name: '编辑 tempmail.lol', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: '编辑 tempmail.lol', exact: true });
+  await expect(dialog.getByLabel('邮箱域名', { exact: true })).toHaveCount(0);
+  await expect(dialog.getByLabel('管理员密码', { exact: true })).toHaveCount(0);
+  await expect(dialog.getByLabel('站点访问密码', { exact: true })).toHaveCount(0);
+  await dialog.getByLabel('请求超时（秒）', { exact: true }).fill('24');
+  await dialog.getByRole('button', { name: '保存供应商', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(state.configWrites).toHaveLength(2);
+  for (const write of state.configWrites) {
+    const entries = write.postDataJSON().providers;
+    expect(entries[2]).toMatchObject({ domain: 'mail.example.test', enabled: true });
+    for (const entry of entries) {
+      expect(entry).not.toHaveProperty('admin_password');
+      expect(entry).not.toHaveProperty('site_password');
+      expect(entry).not.toHaveProperty('admin_password_configured');
+      expect(entry).not.toHaveProperty('site_password_configured');
+    }
+    expect(entries[0]).not.toHaveProperty('domain');
+    expect(entries[1]).not.toHaveProperty('domain');
+  }
+});
+
+test('edits Cloudflare domain and preserves, replaces, and clears hidden credentials', async ({ page }) => {
+  const state = await mockApi(page);
+  state.config.providers.push({
+    ...state.config.providers[0],
+    id: 'cloudflare-temp-email',
+    enabled: false,
+    domain: 'mail.example.test',
+    admin_password_configured: true,
+    site_password_configured: true,
+    base_url: 'https://worker.example.test',
+  });
+  await connect(page, '/providers');
+  const edit = page.getByRole('button', { name: '编辑 cloudflare temp email', exact: true });
+  const dialog = page.getByRole('dialog', { name: '编辑 cloudflare temp email', exact: true });
+  await edit.click();
+  await expect(dialog.getByLabel('邮箱域名', { exact: true })).toHaveValue('mail.example.test');
+  for (const label of ['管理员密码', '站点访问密码']) {
+    const input = dialog.getByLabel(label, { exact: true });
+    await expect(input).toHaveValue('');
+    await expect(input).toHaveAttribute('type', 'password');
+    await expect(input).toHaveAttribute('autocomplete', 'new-password');
+  }
+  await dialog.getByLabel('邮箱域名', { exact: true }).fill('');
+  await dialog.getByRole('button', { name: '保存供应商', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  const first = state.configWrites[0].postDataJSON().providers[2];
+  expect(first.domain).toBeNull();
+  expect(first).not.toHaveProperty('admin_password');
+  expect(first).not.toHaveProperty('site_password');
+
+  await edit.click();
+  await dialog.getByLabel('管理员密码', { exact: true }).fill('test-admin-password');
+  await dialog.getByLabel('站点访问密码', { exact: true }).fill('test-site-password');
+  await dialog.getByRole('button', { name: '保存供应商', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(state.configWrites[1].postDataJSON().providers[2]).toMatchObject({
+    admin_password: 'test-admin-password',
+    site_password: 'test-site-password',
+  });
+  expect(await page.evaluate(() => JSON.stringify({ ...sessionStorage, ...localStorage }))).not.toContain(
+    'test-admin-password',
+  );
+  expect(await page.evaluate(() => JSON.stringify({ ...sessionStorage, ...localStorage }))).not.toContain(
+    'test-site-password',
+  );
+
+  await page.reload();
+  await edit.click();
+  for (const label of ['管理员密码', '站点访问密码']) {
+    await expect(dialog.getByLabel(label, { exact: true })).toHaveValue('');
+    await dialog.getByRole('checkbox', { name: `移除${label}`, exact: true }).check();
+    await expect(dialog.getByLabel(label, { exact: true })).toBeDisabled();
+  }
+  await dialog.getByRole('button', { name: '保存供应商', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(state.configWrites[2].postDataJSON().providers[2]).toMatchObject({
+    admin_password: null,
+    site_password: null,
+  });
+  await edit.click();
+  await expect(dialog.getByRole('checkbox', { name: '移除管理员密码', exact: true })).toHaveCount(0);
+  await expect(dialog.getByRole('checkbox', { name: '移除站点访问密码', exact: true })).toHaveCount(0);
+});
+
 test('keeps saved provider switch unchanged after a failed write', async ({ page }) => {
   const state = await mockApi(page);
   state.configFailure = 'CONFIG_WRITE_FAILED';
   await connect(page, '/providers');
-  const toggle = page.getByRole('switch', { name: '启用 TempMail.lol', exact: true });
+  const toggle = page.getByRole('switch', { name: '启用 tempmail.lol', exact: true });
   await page.locator('.provider-enable').filter({ has: toggle }).click();
   await expect(
     page.getByText('配置未能写入文件，请检查文件权限和磁盘空间后重试。', { exact: true }),
@@ -1277,8 +1401,8 @@ test('keeps saved provider switch unchanged after a failed write', async ({ page
 test('preserves provider dialog draft on conflicts and confirms cancellation', async ({ page }) => {
   const state = await mockApi(page);
   await connect(page, '/providers');
-  await page.getByRole('button', { name: '编辑 TempMail.lol', exact: true }).click();
-  const dialog = page.getByRole('dialog', { name: '编辑 TempMail.lol', exact: true });
+  await page.getByRole('button', { name: '编辑 tempmail.lol', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: '编辑 tempmail.lol', exact: true });
   await dialog.getByLabel('最长本地有效期（秒）', { exact: true }).fill('7200');
   state.config.revision = 'external-edit-revision';
   await dialog.getByRole('button', { name: '保存供应商', exact: true }).click();
@@ -1298,8 +1422,8 @@ test('preserves provider dialog draft on conflicts and confirms cancellation', a
 test('reorders providers in the editor and rejects out-of-range lifetime before saving', async ({ page }) => {
   const state = await mockApi(page);
   await connect(page, '/providers');
-  await page.getByRole('button', { name: '编辑 TempMail.lol', exact: true }).click();
-  const dialog = page.getByRole('dialog', { name: '编辑 TempMail.lol', exact: true });
+  await page.getByRole('button', { name: '编辑 tempmail.lol', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: '编辑 tempmail.lol', exact: true });
   await dialog.getByLabel('选择优先级', { exact: true }).click();
   await page.getByRole('option', { name: '第 1 位', exact: true }).click();
   await dialog.getByLabel('最长本地有效期（秒）', { exact: true }).fill('59');
@@ -1314,7 +1438,7 @@ test('reorders providers in the editor and rejects out-of-range lifetime before 
     'temp-mail-org',
   ]);
   await page.reload();
-  await page.getByRole('button', { name: '编辑 TempMail.lol', exact: true }).click();
+  await page.getByRole('button', { name: '编辑 tempmail.lol', exact: true }).click();
   await expect(dialog.getByLabel('选择优先级', { exact: true })).toContainText('第 1 位');
 });
 
@@ -1776,7 +1900,7 @@ test('limits duration choices to the selected provider capabilities', async ({ p
   await connect(page);
   await page.getByRole('button', { name: '新建邮箱', exact: true }).click();
   await page.getByLabel('邮箱供应商', { exact: true }).click();
-  await page.getByRole('option', { name: 'TempMail.lol', exact: true }).click();
+  await page.getByRole('option', { name: 'tempmail.lol', exact: true }).click();
   await page.getByLabel('有效期', { exact: true }).click();
   await expect(page.getByRole('option', { name: '1 小时', exact: true })).toHaveCount(0);
   await expect(page.getByRole('option', { name: '30 分钟', exact: true })).toHaveCount(0);
@@ -1820,7 +1944,7 @@ test('restores an interrupted creation after reload without changing its request
   await connect(page);
   await page.getByRole('button', { name: '新建邮箱', exact: true }).click();
   await page.getByLabel('邮箱供应商', { exact: true }).click();
-  await page.getByRole('option', { name: 'TempMail.lol', exact: true }).click();
+  await page.getByRole('option', { name: 'tempmail.lol', exact: true }).click();
   await page.getByRole('button', { name: '确认创建', exact: true }).click();
   await expect(page.getByRole('alert')).toContainText('暂时无法连接服务');
   const originalDraft = await page.evaluate(() => sessionStorage.getItem('temp-mail.draft'));
@@ -1829,7 +1953,7 @@ test('restores an interrupted creation after reload without changing its request
   await page.getByRole('button', { name: '继续上次创建', exact: true }).click();
   await expect(page.getByLabel('邮箱供应商', { exact: true })).toBeDisabled();
   await expect(page.getByLabel('有效期', { exact: true })).toBeDisabled();
-  await expect(page.getByLabel('邮箱供应商', { exact: true })).toContainText('TempMail.lol');
+  await expect(page.getByLabel('邮箱供应商', { exact: true })).toContainText('tempmail.lol');
   await expect(page.getByLabel('有效期', { exact: true })).toContainText('10 分钟');
   expect(await page.evaluate(() => sessionStorage.getItem('temp-mail.draft'))).toBe(originalDraft);
   state.completeOperation = true;

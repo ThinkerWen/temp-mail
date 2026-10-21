@@ -90,7 +90,14 @@ export function remaining(expires: string, now: number) {
   );
 }
 export function providerName(id: string) {
-  return { 'temp-mail-org': 'Temp Mail', 'tempmail-lol': 'TempMail.lol', '22-do': '22.do' }[id] ?? id;
+  return (
+    {
+      'temp-mail-org': 'temp-mail.org',
+      'tempmail-lol': 'tempmail.lol',
+      '22-do': '22.do',
+      'cloudflare-temp-email': 'cloudflare temp email',
+    }[id] ?? id
+  );
 }
 
 export function formatDuration(seconds: number) {

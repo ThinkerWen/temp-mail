@@ -42,3 +42,18 @@ providers:
     impersonate: chrome110
     max_ttl_seconds: 86400
     proxy: null
+  cloudflare-temp-email:
+    enabled: false
+    index_url: https://github.com/dreamhunter2333/cloudflare_temp_email
+    # 填写自己部署实例的 Worker API 地址，然后启用。
+    base_url: https://your-worker.example.invalid
+    timeout_seconds: 15
+    impersonate: chrome110
+    max_ttl_seconds: 86400
+    proxy: null
+    # 留空时自动选择实例公开配置中的域名。
+    domain: null
+    # 可选：配置后通过管理员接口创建邮箱；留空使用公开创建接口。
+    admin_password: null
+    # 仅实例设置了站点访问密码时填写。
+    site_password: null

@@ -105,7 +105,9 @@ def test_only_explicit_yaml_providers_are_registered_and_empty_mapping_disables_
 def test_direct_settings_keep_default_providers_without_shared_mutable_options(document):
     first = Settings(**document["app"])
     second = Settings(**document["app"])
-    assert list(first.providers) == ["temp-mail-org", "tempmail-lol", "22-do"]
+    assert list(first.providers) == ["temp-mail-org", "tempmail-lol", "22-do", "cloudflare-temp-email"]
+    assert first.providers["cloudflare-temp-email"].enabled is False
+    assert [provider.id for provider in build_registry(first).all()] == ["temp-mail-org", "tempmail-lol", "22-do"]
     first.providers["temp-mail-org"].options["proxy"] = "http://user:private-proxy-password@localhost:7890"
     assert "proxy" not in second.providers["temp-mail-org"].options
     assert "private-proxy-password" not in repr(first)
@@ -123,6 +125,7 @@ def test_example_config_registers_22_do_after_existing_providers(document, tmp_p
     assert provider.impersonate == "chrome110"
     assert provider.capabilities.max_ttl_seconds == 86400
     assert settings.providers["22-do"].index_url == "https://22.do/"
+    assert settings.providers["cloudflare-temp-email"].enabled is False
 
 
 def test_registry_construction_neither_creates_database_nor_adds_simulated_tables(document, tmp_path):
@@ -285,3 +288,21 @@ def test_invalid_provider_proxy_option_is_rejected_without_exposing_credentials(
         settings = Settings.from_yaml(write_config(tmp_path / "config.yaml", document))
         build_registry(settings)
     assert "private-proxy-secret" not in str(caught.value)
+
+
+@pytest.mark.parametrize("base_url", [None, "https://your-worker.example.invalid", "https://EXAMPLE.INVALID.", "ftp://mail.example.test"])
+def test_cloudflare_cannot_be_enabled_without_real_worker_url(document, tmp_path, base_url):
+    document["providers"] = {"cloudflare-temp-email": {"enabled": True}}
+    if base_url is not None:
+        document["providers"]["cloudflare-temp-email"]["base_url"] = base_url
+    with pytest.raises(ValueError, match="base_url"):
+        Settings.from_yaml(write_config(tmp_path / "config.yaml", document))
+
+
+@pytest.mark.parametrize("provider_id", ["temp-mail-org", "tempmail-lol", "22-do"])
+@pytest.mark.parametrize("name", ["domain", "admin_password", "site_password"])
+def test_cloudflare_options_are_not_accepted_for_other_providers(document, tmp_path, provider_id, name):
+    document["providers"] = {provider_id: {name: "private-option-value"}}
+    with pytest.raises(ValueError) as error:
+        Settings.from_yaml(write_config(tmp_path / "config.yaml", document))
+    assert "private-option-value" not in str(error.value)

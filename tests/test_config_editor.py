@@ -49,7 +49,7 @@ def patch(client, **changes):
 
 def providers(client):
     return [
-        {key: value for key, value in item.items() if key not in {"proxy_configured", "capabilities"}}
+        {key: value for key, value in item.items() if key != "capabilities" and not key.endswith("_configured")}
         for item in client.get("/v1/config").json()["providers"]
     ]
 
@@ -71,9 +71,9 @@ def test_config_get_is_authenticated_and_never_returns_credentials(client, docum
         "create_concurrency": 2,
         "receive_concurrency": 4,
     }
-    assert [item["id"] for item in body["providers"]] == ["tempmail-lol", "temp-mail-org", "22-do"]
-    assert [item["enabled"] for item in body["providers"]] == [False, False, False]
-    assert [item["proxy_configured"] for item in body["providers"]] == [True, False, False]
+    assert [item["id"] for item in body["providers"]] == ["tempmail-lol", "temp-mail-org", "22-do", "cloudflare-temp-email"]
+    assert [item["enabled"] for item in body["providers"]] == [False, False, False, False]
+    assert [item["proxy_configured"] for item in body["providers"]] == [True, False, False, False]
     assert body["providers"][1]["impersonate"] == "chrome110"
     for secret in (document["app"]["api_token"], document["app"]["encryption_key"], "private-proxy-secret"):
         assert secret not in response.text
@@ -145,11 +145,11 @@ def test_reordering_providers_preserves_secrets_and_other_sections(client, confi
     items = providers(client)[::-1]
     if proxy_value != "omitted":
         items[-1]["proxy"] = proxy_value
-    items[1]["enabled"] = True
+    next(item for item in items if item["id"] == "temp-mail-org")["enabled"] = True
     response = client.put("/v1/config", json=patch(client, providers=items))
     assert response.status_code == 200
     saved = yaml.safe_load(config_file.read_text())
-    assert list(saved["providers"]) == ["22-do", "temp-mail-org", "tempmail-lol"]
+    assert list(saved["providers"]) == ["cloudflare-temp-email", "22-do", "temp-mail-org", "tempmail-lol"]
     assert saved["providers"]["tempmail-lol"]["proxy"] == document["providers"]["tempmail-lol"]["proxy"]
     assert saved["app"] == document["app"]
     assert saved["worker"] == document["worker"]
@@ -358,7 +358,7 @@ def test_provider_validation_does_not_open_network_sessions(client, monkeypatch)
     monkeypatch.setattr("app.providers.temp_mail_org.requests.Session", unexpected)
     items = providers(client)
     for item in items:
-        item["enabled"] = True
+        item["enabled"] = item["id"] != "cloudflare-temp-email"
     response = client.put("/v1/config", json=patch(client, providers=items))
     assert response.status_code == 200
 
@@ -451,7 +451,7 @@ def test_nonobject_save_body_has_generic_config_error(client, body):
 def test_disabled_and_missing_providers_expose_configured_capabilities(client):
     response = client.get("/v1/config")
     assert response.status_code == 200
-    for provider, expected in zip(response.json()["providers"], [3600, 86400, 86400], strict=True):
+    for provider, expected in zip(response.json()["providers"], [3600, 86400, 86400, 86400], strict=True):
         assert provider["enabled"] is False
         assert provider["max_ttl_seconds"] == expected
         assert provider["capabilities"]["max_ttl_seconds"] == expected
@@ -503,4 +503,98 @@ def test_provider_capabilities_are_readonly(client, config_file):
     response = client.put("/v1/config", json=patch(client, providers=items))
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "CONFIG_INVALID"
+    assert config_file.read_bytes() == before
+
+
+def test_cloudflare_configuration_hot_reloads_without_network_or_secret_disclosure(client, config_file, monkeypatch):
+    def unexpected(*args, **kwargs):
+        pytest.fail("Configuration editing must remain offline")
+
+    monkeypatch.setattr("app.providers.cloudflare_temp_email.requests.Session", unexpected)
+    worker = Runtime(Settings.from_yaml(config_file))
+    items = providers(client)
+    provider = next(item for item in items if item["id"] == "cloudflare-temp-email")
+    assert provider["enabled"] is False
+    assert provider["domain"] is None
+    provider.update(
+        enabled=True,
+        base_url="https://worker.example.test",
+        domain="mail.example.test",
+        admin_password="private-admin-secret",
+        site_password="private-site-secret",
+        timeout_seconds=8,
+        max_ttl_seconds=7200,
+    )
+    response = client.put("/v1/config", json=patch(client, providers=items))
+    assert response.status_code == 200
+    assert response.json()["restart_required"] is False
+    for result in (response, client.get("/v1/config"), client.get("/v1/capabilities")):
+        assert "private-admin-secret" not in result.text
+        assert "private-site-secret" not in result.text
+    view = next(item for item in response.json()["providers"] if item["id"] == provider["id"])
+    assert view["domain"] == "mail.example.test"
+    assert view["admin_password_configured"] is view["site_password_configured"] is True
+    assert "admin_password" not in view and "site_password" not in view
+    for service in (client.app.state.service, worker.refresh()):
+        adapter = service.registry.get("cloudflare-temp-email")
+        assert adapter.admin_password == "private-admin-secret"
+        assert adapter.site_password == "private-site-secret"
+        assert adapter.domain == "mail.example.test"
+        assert adapter.timeout_seconds == 8
+        assert adapter.capabilities.max_ttl_seconds == 7200
+    provider["enabled"] = False
+    assert client.put("/v1/config", json=patch(client, providers=items)).status_code == 200
+    assert client.app.state.service.registry.all() == worker.refresh().registry.all() == []
+
+
+@pytest.mark.parametrize("blank", ["omitted", "", "   "])
+def test_cloudflare_secrets_survive_other_provider_edits_and_can_be_replaced_or_cleared(client, config_file, blank):
+    items = providers(client)
+    provider = next(item for item in items if item["id"] == "cloudflare-temp-email")
+    provider.update(domain="mail.example.test", admin_password="original-admin-secret", site_password="original-site-secret")
+    assert client.put("/v1/config", json=patch(client, providers=items)).status_code == 200
+    items = providers(client)
+    provider = next(item for item in items if item["id"] == "cloudflare-temp-email")
+    provider.pop("domain")
+    if blank != "omitted":
+        provider.update(admin_password=blank, site_password=blank)
+    items[0]["enabled"] = True
+    response = client.put("/v1/config", json=patch(client, providers=items))
+    assert response.status_code == 200
+    saved = Settings.from_yaml(config_file).providers["cloudflare-temp-email"].options
+    assert saved["domain"] == "mail.example.test"
+    assert saved["admin_password"] == "original-admin-secret"
+    assert saved["site_password"] == "original-site-secret"
+    provider.update(admin_password="replacement-admin-secret", site_password="replacement-site-secret", domain="")
+    assert client.put("/v1/config", json=patch(client, providers=items)).status_code == 200
+    saved = Settings.from_yaml(config_file).providers["cloudflare-temp-email"].options
+    assert saved["domain"] is None
+    assert saved["admin_password"] == "replacement-admin-secret"
+    assert saved["site_password"] == "replacement-site-secret"
+    provider.update(admin_password=None, site_password=None, domain=None)
+    response = client.put("/v1/config", json=patch(client, providers=items))
+    assert response.status_code == 200
+    view = next(item for item in response.json()["providers"] if item["id"] == provider["id"])
+    assert view["admin_password_configured"] is view["site_password_configured"] is False
+    saved = Settings.from_yaml(config_file).providers["cloudflare-temp-email"].options
+    assert saved["admin_password"] is saved["site_password"] is saved["domain"] is None
+
+
+@pytest.mark.parametrize("field", ["domain", "admin_password", "site_password"])
+def test_non_cloudflare_provider_cannot_save_cloudflare_fields(client, config_file, field):
+    items = providers(client)
+    items[0][field] = "private-invalid-option"
+    before = config_file.read_bytes()
+    response = client.put("/v1/config", json=patch(client, providers=items))
+    assert response.status_code == 422
+    assert "private-invalid-option" not in response.text
+    assert config_file.read_bytes() == before
+
+
+def test_enabling_cloudflare_placeholder_is_rejected_without_changing_file(client, config_file):
+    items = providers(client)
+    next(item for item in items if item["id"] == "cloudflare-temp-email")["enabled"] = True
+    before = config_file.read_bytes()
+    response = client.put("/v1/config", json=patch(client, providers=items))
+    assert response.status_code == 422
     assert config_file.read_bytes() == before

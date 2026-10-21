@@ -15,16 +15,27 @@ from urllib.parse import urlsplit
 
 import yaml
 from curl_cffi.requests.impersonate import BrowserTypeLiteral
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from app.config import PROVIDER_OPTIONS, Settings, _ConfigLoader
 from app.errors import ServiceError
 from app.limits import MAX_MAILBOX_TTL_SECONDS, MAX_WORKER_CONCURRENCY, MIN_MAILBOX_TTL_SECONDS
 from app.providers import TempMailLolProvider, TempMailOrgProvider
+from app.providers.cloudflare_temp_email import CloudflareTempEmailProvider
 from app.providers.twenty_two_do import TwentyTwoDoProvider
 
-PROVIDER_CLASSES = {"temp-mail-org": TempMailOrgProvider, "tempmail-lol": TempMailLolProvider, "22-do": TwentyTwoDoProvider}
-INDEX_URLS = {"temp-mail-org": "https://temp-mail.org/", "tempmail-lol": "https://tempmail.lol/", "22-do": "https://22.do/"}
+PROVIDER_CLASSES = {
+    "temp-mail-org": TempMailOrgProvider,
+    "tempmail-lol": TempMailLolProvider,
+    "22-do": TwentyTwoDoProvider,
+    "cloudflare-temp-email": CloudflareTempEmailProvider,
+}
+INDEX_URLS = {
+    "temp-mail-org": "https://temp-mail.org/",
+    "tempmail-lol": "https://tempmail.lol/",
+    "22-do": "https://22.do/",
+    "cloudflare-temp-email": "https://github.com/dreamhunter2333/cloudflare_temp_email",
+}
 PositiveNumber = Annotated[float, Field(gt=0, allow_inf_nan=False)]
 PositiveInteger = Annotated[int, Field(gt=0)]
 
@@ -47,7 +58,7 @@ class WorkerUpdate(ConfigModel):
 
 
 class ProviderUpdate(ConfigModel):
-    id: Literal["temp-mail-org", "tempmail-lol", "22-do"]
+    id: Literal["temp-mail-org", "tempmail-lol", "22-do", "cloudflare-temp-email"]
     enabled: bool
     index_url: Annotated[str, Field(max_length=4096)] | None
     base_url: Annotated[str, Field(min_length=1, max_length=4096)]
@@ -55,6 +66,15 @@ class ProviderUpdate(ConfigModel):
     impersonate: Annotated[str, Field(min_length=1, max_length=100)]
     max_ttl_seconds: Annotated[int, Field(ge=MIN_MAILBOX_TTL_SECONDS, le=MAX_MAILBOX_TTL_SECONDS)] | None = None
     proxy: Annotated[str, Field(max_length=8192)] | None = None
+    domain: Annotated[str, Field(max_length=253)] | None = None
+    admin_password: Annotated[str, Field(max_length=8192)] | None = None
+    site_password: Annotated[str, Field(max_length=8192)] | None = None
+
+    @model_validator(mode="after")
+    def validate_specific_options(self):
+        if self.id != "cloudflare-temp-email" and self.model_fields_set & {"domain", "admin_password", "site_password"}:
+            raise ValueError("Unsupported provider options")
+        return self
 
 
 class ConfigUpdate(ConfigModel):
@@ -109,6 +129,8 @@ def _effective(settings: Settings) -> dict:
                 "capabilities": asdict(provider.capabilities),
             }
         )
+        if name == "cloudflare-temp-email":
+            providers[-1].update(domain=provider.domain, admin_password=provider.admin_password, site_password=provider.site_password)
     return {
         "app": {"db_path": settings.db_path, "api_token": settings.api_token, "encryption_key": settings.encryption_key},
         "worker": {
@@ -210,6 +232,9 @@ class ConfigStore:
         }
         for provider in effective["providers"]:
             provider["proxy_configured"] = bool(provider.pop("proxy"))
+            if provider["id"] == "cloudflare-temp-email":
+                for name in ("admin_password", "site_password"):
+                    provider[f"{name}_configured"] = bool(provider.pop(name))
         return {
             "revision": _revision(content),
             "restart_required": bool(restart_required_fields),
@@ -224,7 +249,7 @@ class ConfigStore:
         path = self._require_path()
         try:
             patch = ConfigUpdate.model_validate(body)
-            # Optional fields are omittable, but null is only meaningful for a provider proxy/index URL.
+            # Null is only meaningful for nullable provider options.
             if any(value is None for value in patch.model_dump(exclude_unset=True).values()):
                 raise ValueError
             for section in (patch.app, patch.worker):
@@ -251,16 +276,24 @@ class ConfigStore:
                 if patch.providers is not None:
                     providers = {}
                     for item in patch.providers:
-                        values = item.model_dump(exclude_unset=True, exclude={"id", "proxy"})
+                        secret_fields = ("proxy", "admin_password", "site_password") if item.id == "cloudflare-temp-email" else ("proxy",)
+                        values = item.model_dump(exclude_unset=True, exclude={"id", *secret_fields})
                         previous = document["providers"].get(item.id, {})
                         if "max_ttl_seconds" not in item.model_fields_set and "max_ttl_seconds" in previous:
                             values["max_ttl_seconds"] = previous["max_ttl_seconds"]
-                        if "proxy" in item.model_fields_set and item.proxy is None:
-                            values["proxy"] = None
-                        elif item.proxy and item.proxy.strip():
-                            values["proxy"] = item.proxy.strip()
-                        elif "proxy" in previous:
-                            values["proxy"] = previous["proxy"]
+                        for name in secret_fields:
+                            value = getattr(item, name)
+                            if name in item.model_fields_set and value is None:
+                                values[name] = None
+                            elif value and value.strip():
+                                values[name] = value.strip()
+                            elif name in previous:
+                                values[name] = previous[name]
+                        if item.id == "cloudflare-temp-email":
+                            if "domain" in item.model_fields_set:
+                                values["domain"] = item.domain.strip() or None if item.domain is not None else None
+                            elif "domain" in previous:
+                                values["domain"] = previous["domain"]
                         providers[item.id] = values
                     updated["providers"] = providers
                 try:

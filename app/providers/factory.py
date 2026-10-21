@@ -1,4 +1,5 @@
 from app.config import Settings
+from app.providers.cloudflare_temp_email import CloudflareTempEmailProvider
 from app.providers.registry import Registry
 from app.providers.temp_mail_org import TempMailOrgProvider
 from app.providers.tempmail_lol import TempMailLolProvider
@@ -16,4 +17,6 @@ def build_registry(settings: Settings) -> Registry:
             providers.append(TempMailLolProvider(**config.options))
         elif provider_id == "22-do":
             providers.append(TwentyTwoDoProvider(**config.options))
+        elif provider_id == "cloudflare-temp-email":
+            providers.append(CloudflareTempEmailProvider(**config.options))
     return Registry(providers)

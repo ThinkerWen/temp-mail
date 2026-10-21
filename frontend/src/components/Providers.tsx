@@ -17,6 +17,11 @@ type ProviderDraft = {
   max_ttl_seconds: string;
   proxy: string;
   clearProxy: boolean;
+  domain: string;
+  admin_password: string;
+  site_password: string;
+  clearAdminPassword: boolean;
+  clearSitePassword: boolean;
   priority: string;
 };
 
@@ -30,6 +35,11 @@ function makeDraft(provider: ProviderConfig, index: number): ProviderDraft {
     max_ttl_seconds: String(provider.max_ttl_seconds),
     proxy: '',
     clearProxy: false,
+    domain: provider.domain ?? '',
+    admin_password: '',
+    site_password: '',
+    clearAdminPassword: false,
+    clearSitePassword: false,
     priority: String(index),
   };
 }
@@ -43,6 +53,7 @@ function providerPayload(provider: ProviderConfig) {
     timeout_seconds: provider.timeout_seconds,
     impersonate: provider.impersonate,
     max_ttl_seconds: provider.max_ttl_seconds,
+    ...(provider.id === 'cloudflare-temp-email' ? { domain: provider.domain ?? null } : {}),
   };
 }
 
@@ -249,6 +260,21 @@ export default function Providers({
             impersonate: draft.impersonate,
             max_ttl_seconds: Number(draft.max_ttl_seconds),
             ...(draft.clearProxy ? { proxy: null } : draft.proxy ? { proxy: draft.proxy } : {}),
+            ...(draft.id === 'cloudflare-temp-email'
+              ? {
+                  domain: draft.domain.trim() || null,
+                  ...(draft.clearAdminPassword
+                    ? { admin_password: null }
+                    : draft.admin_password
+                      ? { admin_password: draft.admin_password }
+                      : {}),
+                  ...(draft.clearSitePassword
+                    ? { site_password: null }
+                    : draft.site_password
+                      ? { site_password: draft.site_password }
+                      : {}),
+                }
+              : {}),
           }
         : providerPayload(item),
     );
@@ -457,7 +483,27 @@ export default function Providers({
                         required
                         value={draft.base_url}
                         onChange={(value) => edit({ base_url: value })}
+                        hint={
+                          draft.id === 'cloudflare-temp-email'
+                            ? t(
+                                '填写你部署的 Worker API 地址。',
+                                'Enter the API URL of your deployed Worker.',
+                              )
+                            : undefined
+                        }
                       />
+                      {draft.id === 'cloudflare-temp-email' && (
+                        <ConfigField
+                          label={t('邮箱域名', 'Mailbox domain')}
+                          value={draft.domain}
+                          onChange={(value) => edit({ domain: value })}
+                          placeholder="mail.example.com"
+                          hint={t(
+                            '留空使用上游默认域名。',
+                            'Leave blank to use the upstream default domain.',
+                          )}
+                        />
+                      )}
                       <ConfigField
                         label={t('请求超时（秒）', 'Request timeout (seconds)')}
                         type="number"
@@ -522,6 +568,78 @@ export default function Providers({
                         </p>
                       </Select>
                     </div>
+                    {draft.id === 'cloudflare-temp-email' && (
+                      <>
+                        <div className="config-proxy">
+                          <ConfigField
+                            label={t('管理员密码', 'Admin password')}
+                            type="password"
+                            autoComplete="new-password"
+                            disabled={draft.clearAdminPassword}
+                            value={draft.admin_password}
+                            onChange={(value) => edit({ admin_password: value })}
+                            placeholder={t('留空保留原配置', 'Leave blank to keep the current configuration')}
+                            hint={
+                              editing.admin_password_configured
+                                ? t(
+                                    '已配置，现有密码不会显示。用于管理员创建邮箱。',
+                                    'Configured. The current password is hidden and is used to create mailboxes as an admin.',
+                                  )
+                                : t(
+                                    '可选。配置后使用管理员接口创建邮箱，否则使用公开接口。',
+                                    'Optional. Use the admin endpoint to create mailboxes when configured; otherwise use the public endpoint.',
+                                  )
+                            }
+                          />
+                          {editing.admin_password_configured && (
+                            <label className="config-toggle">
+                              <input
+                                type="checkbox"
+                                checked={draft.clearAdminPassword}
+                                onChange={(event) =>
+                                  edit({ clearAdminPassword: event.target.checked, admin_password: '' })
+                                }
+                              />
+                              <span>{t('移除管理员密码', 'Remove admin password')}</span>
+                            </label>
+                          )}
+                        </div>
+                        <div className="config-proxy">
+                          <ConfigField
+                            label={t('站点访问密码', 'Site access password')}
+                            type="password"
+                            autoComplete="new-password"
+                            disabled={draft.clearSitePassword}
+                            value={draft.site_password}
+                            onChange={(value) => edit({ site_password: value })}
+                            placeholder={t('留空保留原配置', 'Leave blank to keep the current configuration')}
+                            hint={
+                              editing.site_password_configured
+                                ? t(
+                                    '已配置，现有密码不会显示。填写新密码可替换。',
+                                    'Configured. The current password is hidden; enter a new password to replace it.',
+                                  )
+                                : t(
+                                    '可选。仅在上游站点设置了访问密码时填写。',
+                                    'Optional. Only required when the upstream site has an access password.',
+                                  )
+                            }
+                          />
+                          {editing.site_password_configured && (
+                            <label className="config-toggle">
+                              <input
+                                type="checkbox"
+                                checked={draft.clearSitePassword}
+                                onChange={(event) =>
+                                  edit({ clearSitePassword: event.target.checked, site_password: '' })
+                                }
+                              />
+                              <span>{t('移除站点访问密码', 'Remove site access password')}</span>
+                            </label>
+                          )}
+                        </div>
+                      </>
+                    )}
                     <div className="config-proxy">
                       <ConfigField
                         label={t('替换代理地址', 'Replace proxy URL')}

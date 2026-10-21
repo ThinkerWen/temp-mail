@@ -21,6 +21,9 @@ export interface ProviderConfig {
   timeout_seconds: number;
   impersonate: string;
   proxy_configured: boolean;
+  domain?: string | null;
+  admin_password_configured?: boolean;
+  site_password_configured?: boolean;
   max_ttl_seconds: number;
   capabilities: Capabilities;
 }
@@ -42,7 +45,10 @@ export interface ConfigurationPatch {
   revision: string;
   app?: { db_path?: string; api_token?: string };
   worker?: Partial<Configuration['worker']>;
-  providers?: (Omit<ProviderConfig, 'proxy_configured' | 'capabilities'> & { proxy?: string | null })[];
+  providers?: (Omit<
+    ProviderConfig,
+    'proxy_configured' | 'capabilities' | 'admin_password_configured' | 'site_password_configured'
+  > & { proxy?: string | null; admin_password?: string | null; site_password?: string | null })[];
 }
 export interface Mailbox {
   id: string;
