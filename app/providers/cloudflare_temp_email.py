@@ -3,6 +3,7 @@
 import hashlib
 import math
 import re
+import secrets
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import replace
@@ -18,7 +19,6 @@ from email.parser import BytesParser
 from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import quote, urlsplit
-from uuid import uuid4
 
 from curl_cffi import requests
 from curl_cffi.requests.exceptions import RequestException
@@ -26,6 +26,92 @@ from curl_cffi.requests.exceptions import RequestException
 from app.limits import validate_max_ttl_seconds
 from app.providers.base import Capabilities, ProviderError, ProviderMailbox, ProviderMessage
 from app.providers.message_text import html_to_text
+
+FIRST_NAMES = (
+    "alex",
+    "alice",
+    "amelia",
+    "anna",
+    "ben",
+    "charlie",
+    "chloe",
+    "clara",
+    "daniel",
+    "ella",
+    "emma",
+    "ethan",
+    "eva",
+    "felix",
+    "grace",
+    "henry",
+    "jack",
+    "james",
+    "julia",
+    "leo",
+    "liam",
+    "lily",
+    "lucas",
+    "maya",
+    "mia",
+    "noah",
+    "nora",
+    "oliver",
+    "oscar",
+    "ruby",
+    "sophie",
+    "theo",
+)
+LAST_NAMES = (
+    "adams",
+    "allen",
+    "baker",
+    "bell",
+    "bennett",
+    "brooks",
+    "brown",
+    "carter",
+    "clark",
+    "cole",
+    "collins",
+    "cooper",
+    "davis",
+    "ellis",
+    "evans",
+    "foster",
+    "gray",
+    "green",
+    "hall",
+    "harris",
+    "hayes",
+    "hill",
+    "lane",
+    "lee",
+    "miller",
+    "moore",
+    "parker",
+    "reed",
+    "scott",
+    "stone",
+    "walker",
+    "wood",
+)
+WORDS = tuple("river meadow cedar maple willow ocean forest cloud breeze sunrise sunset autumn spring summer winter silver".split())
+
+
+def _random_name() -> str:
+    separator = secrets.choice(("", ".", "_"))
+    style = secrets.randbelow(4)
+    if style == 0:
+        parts = [secrets.choice(FIRST_NAMES)]
+    elif style == 1:
+        parts = [secrets.choice(FIRST_NAMES), secrets.choice(LAST_NAMES)]
+    elif style == 2:
+        parts = [secrets.choice(FIRST_NAMES), secrets.choice(WORDS)]
+    else:
+        first = secrets.choice(WORDS)
+        parts = [first, secrets.choice(tuple(word for word in WORDS if word != first))]
+    suffix = "".join(secrets.choice("abcdefghijklmnopqrstuvwxyz0123456789") for _ in range(4))
+    return separator.join(parts) + suffix
 
 
 class CloudflareTempEmailProvider:
@@ -165,7 +251,9 @@ class CloudflareTempEmailProvider:
             raise ProviderError("TTL_UNSUPPORTED", "Requested mailbox lifetime is unsupported")
         self._check_configured()
         admin = self.admin_password is not None
-        payload = {"name": uuid4().hex[:24], "enablePrefix": False} if admin else {}
+        payload = {}
+        if admin:
+            payload = {"name": _random_name(), "enablePrefix": False}
         if self.domain is not None:
             payload["domain"] = self.domain
         try:
